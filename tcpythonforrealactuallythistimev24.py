@@ -227,7 +227,8 @@ def _evaluate_point_worker(i, meanw_np, stdw_np, meanl_np, stdl_np, meand_np, st
     probs = np.clip(probs, 1e-12, 1 - 1e-12)
     H = -(probs * np.log(probs)).sum()
     joint_std = float(stdw_np[i] * stdl_np[i] * stdd_np[i])
-    return float(H * joint_std)
+    return float(H) 
+# JOINT STD IS GONE FOR NOW!!!
 def entropy_sigma(X, gps, constraints, thickness, Xtrain=None, mode="MC", nmc=8, n_cores=1):
     gpw, gpl, gpd = gps
     c1, c2, c3 = constraints
@@ -276,7 +277,7 @@ def entropy_sigma(X, gps, constraints, thickness, Xtrain=None, mode="MC", nmc=8,
         results.append(val)
 
     return np.array(results)
-    return np.array(results)
+
 def plot_mc_defect_map(labels_grid, powergrid, velogrid, use_balling=USE_BALLING, alpha_defects=0.7, J=None, iteration=None):
 
     if J is not None:
@@ -519,3 +520,5 @@ while success_it < niter:
             iteration=success_it
         )
         plt.close('all')  # erase figure to free memory
+
+preds, rmses = evaluate_gp_models(gp_models, X, Y_targets, n_samples=10, label="After Active Learning")
