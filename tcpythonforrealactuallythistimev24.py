@@ -256,7 +256,6 @@ def entropy_sigma(X, gps, constraints, thickness, Xtrain=None, mode="MC", nmc=8,
         samplel = gpl.posterior(X).rsample(torch.Size([nmc])).squeeze(-1).cpu().numpy()
         sampled = gpd.posterior(X).rsample(torch.Size([nmc])).squeeze(-1).cpu().numpy()
 
-    results = []
     for i in range(N):
         val = _evaluate_point_worker(
             i,
@@ -272,9 +271,13 @@ def entropy_sigma(X, gps, constraints, thickness, Xtrain=None, mode="MC", nmc=8,
             # compute distance to nearest training point
             dists = np.linalg.norm(X[i].cpu().numpy() - Xtrain.cpu().numpy(), axis=1)
             min_dist = dists.min()
-            val *= (1 + min_dist)  # scale acquisition
+
+            # flipped penalty: downweight far-away points instead of boosting them
+            alpha = 1.0  # tune between ~0.5–2.0 depending on how hard you want to suppress edges
+            val = val / (1.0 + alpha * min_dist)
 
         results.append(val)
+
 
     return np.array(results)
 
