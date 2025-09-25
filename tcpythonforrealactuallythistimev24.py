@@ -38,6 +38,7 @@ HATCH_DISTANCE = 10.0  # in micro-meter. Only single track experiment but let's 
 AMBIENT_TEMPERATURE = 353  # in K, as given in the paper
 USE_BALLING = True
 USE_EDENSITY   = False  
+USE_EDGE_PENALTY = True
 dtype = torch.double
 device = torch.device("cpu")
 thickness = 10
@@ -227,7 +228,7 @@ def _evaluate_point_worker(i, meanw_np, stdw_np, meanl_np, stdl_np, meand_np, st
     H = -(probs * np.log(probs)).sum()
     joint_std = float(stdw_np[i] * stdl_np[i] * stdd_np[i])
     return float(H * joint_std)
-def entropy_sigma(X, gps, constraints, thickness, mode="MC", nmc=8, n_cores=1):
+def entropy_sigma(X, gps, constraints, thickness, Xtrain=None, mode="MC", nmc=8, n_cores=1):
     gpw, gpl, gpd = gps
     c1, c2, c3 = constraints
     N = X.shape[0]
@@ -265,8 +266,16 @@ def entropy_sigma(X, gps, constraints, thickness, mode="MC", nmc=8, n_cores=1):
             c1, c2, c3,
             thickness, mode
         )
+
+        if USE_EDGE_PENALTY and Xtrain is not None:
+            # compute distance to nearest training point
+            dists = np.linalg.norm(X[i].cpu().numpy() - Xtrain.cpu().numpy(), axis=1)
+            min_dist = dists.min()
+            val *= (1 + min_dist)  # scale acquisition
+
         results.append(val)
 
+    return np.array(results)
     return np.array(results)
 def plot_mc_defect_map(labels_grid, powergrid, velogrid, use_balling=USE_BALLING, alpha_defects=0.7, J=None, iteration=None):
 
@@ -403,7 +412,15 @@ while success_it < niter:
 
         # Pick next x with top-3 fallback
         gps = [gp_models["Width"], gp_models["Depth"], gp_models["Length"]]
-        J = entropy_sigma(Xgrid, gps, constraints, thickness=thickness, mode="MC", nmc=nmc)
+        J = entropy_sigma(
+            Xgrid,
+            gps,
+            constraints,
+            thickness=thickness,
+            Xtrain=X,   
+            mode="MC",
+            nmc=nmc
+            )
 
         sorted_idx = np.argsort(-J)[:3]  # only top 3 candidates
         d_next = w_next = l_next = None
