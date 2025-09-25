@@ -393,8 +393,10 @@ gps_history = []
 Xtrain_history = []
 J_history = []
 
-# Active learning loop
-for it in range(niter):
+# Active learning loop with top-3 fallback and only counting successful iterations
+success_it = 0  # counts successful iterations
+
+while success_it < niter:
     with TCPython(logging_policy=LoggingPolicy.SCREEN) as start:
         start.set_cache_folder("cache")
         mp = MaterialProperties.from_library(MATERIAL_NAME)
@@ -439,12 +441,12 @@ for it in range(niter):
                 break
 
             except tc_python.exceptions.CalculationException:
-                print(f"[iter {it+1}] Thermo-Calc failed at candidate {ind}, trying next-best...")
+                print(f"[trial] Thermo-Calc failed at candidate {ind}, trying next-best...")
                 continue  # try next-best
 
         if x_next is None or d_next is None:
-            print(f"[iter {it+1}] Top 3 candidates failed, skipping iteration.")
-            continue
+            print(f"[trial] Top 3 candidates failed, retrying without incrementing iteration.")
+            continue  # do NOT increment success_it, retry
 
         # Cleanup immediately
         del result, am_calculator, heat_source
@@ -467,12 +469,14 @@ for it in range(niter):
         gp = fitGP(gp, restarts=restarts)
         gp_models[task] = gp
 
-    print(f"[iter {it+1}/{niter}] DONE: "
+    success_it += 1  # increment only on success
+
+    print(f"[iter {success_it}/{niter}] DONE: "
           f"P={float(x_next[0,0]):.2f}, V={float(x_next[0,1]):.2f}, "
           f"W={w_next:.2f}, D={d_next:.2f}, L={l_next:.2f}")
 
-    # plot every 5 iters
-    if (it + 1) % 5 == 0 or it == niter-1:
+    # plot every 5 successful iterations
+    if (success_it) % 5 == 0 or success_it == niter:
         with torch.no_grad():
             gpw, gpd, gpl = gp_models["Width"], gp_models["Depth"], gp_models["Length"]
             width_samples  = gpw.posterior(Xgrid).rsample(torch.Size([nmc])).squeeze(-1).cpu().numpy()
@@ -495,6 +499,6 @@ for it in range(niter):
             use_balling=USE_BALLING,
             alpha_defects=0.7,
             J=J,
-            iteration=it+1
+            iteration=success_it
         )
         plt.close('all')  # erase figure to free memory
