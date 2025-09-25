@@ -138,17 +138,20 @@ def evaluate_gp_models(gp_models, X, Y_targets, n_samples=10, label=""):
 
     return preds, rmses
 def classify_defect(width, depth, e, length=None, thickness=10, ed_low=edensity_low, ed_high=edensity_high):
+    jitter = 1e-9
     if e is not None:
         if e < ed_low:
             return "Lack of Fusion"
         elif e > ed_high:
             return "Keyhole"
-    if width/depth < 1.5:
+    if (depth + jitter) == 0:
+        return "Lack of Fusion"
+    if width / (depth + jitter) < 1.5:
         return "Keyhole"
-    elif depth/thickness < 1.9:
+    elif (depth + jitter) / (thickness + jitter) < 1.9:
         return "Lack of Fusion"
     if USE_BALLING and (length is not None):
-        if width/length < 0.23:
+        if width / (length + jitter) < 0.23:
             return "Balling"
     return "Good"
 
@@ -206,11 +209,12 @@ evaluate_gp_models(gp_models, X, Y_targets, n_samples=10, label="After training"
 def _evaluate_point_worker(i, meanw_np, stdw_np, meanl_np, stdl_np, meand_np, stdd_np,
                            samplew_np, samplel_np, sampled_np, c1, c2, c3, thickness,
                            mode):
+    jitter = 1e-9
     if mode == "MC":
         sw = samplew_np[:, i]; sl = samplel_np[:, i]; sd = sampled_np[:, i]
-        keyholing = (sw / sd) < c1
-        lof = (sd / thickness) < c2
-        balling = (sl / sw) > c3
+        keyholing = (sw / (sd + jitter)) < c1
+        lof = ((sd + jitter) / (thickness + jitter)) < c2
+        balling = (sl / (sw + jitter)) > c3
         p1, p2, p3 = float(np.mean(keyholing)), float(np.mean(lof)), float(np.mean(balling))
         p4 = max(1.0 - (p1 + p2 + p3), 1e-12)
     elif mode == "Blind":
@@ -223,7 +227,6 @@ def _evaluate_point_worker(i, meanw_np, stdw_np, meanl_np, stdl_np, meand_np, st
     H = -(probs * np.log(probs)).sum()
     joint_std = float(stdw_np[i] * stdl_np[i] * stdd_np[i])
     return float(H * joint_std)
-
 def entropy_sigma(X, gps, constraints, thickness, mode="MC", nmc=8, n_cores=1):
     gpw, gpl, gpd = gps
     c1, c2, c3 = constraints
@@ -266,9 +269,7 @@ def entropy_sigma(X, gps, constraints, thickness, mode="MC", nmc=8, n_cores=1):
 
     return np.array(results)
 def plot_mc_defect_map(labels_grid, powergrid, velogrid, use_balling=USE_BALLING, alpha_defects=0.7, J=None, iteration=None):
-    """
-    Plots Monte Carlo defect map, optionally alongside acquisition function J.
-    """
+
     if J is not None:
         fig, axes = plt.subplots(1, 2, figsize=(14, 6))
         ax_defect, ax_acq = axes
