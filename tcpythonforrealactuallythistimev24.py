@@ -393,47 +393,65 @@ gps_history = []
 Xtrain_history = []
 J_history = []
 
+# Active learning loop
 for it in range(niter):
     with TCPython(logging_policy=LoggingPolicy.SCREEN) as start:
         start.set_cache_folder("cache")
         mp = MaterialProperties.from_library(MATERIAL_NAME)
 
-        # Pick next x
+        # Pick next x with top-3 fallback
         gps = [gp_models["Width"], gp_models["Depth"], gp_models["Length"]]
         J = entropy_sigma(Xgrid, gps, constraints, thickness=thickness, mode="MC", nmc=nmc)
-        ind = int(np.argmax(J))
-        x_next = Xgrid[ind:ind+1]
 
-        # New calculator each time
-        am_calculator = (
-            start.with_additive_manufacturing()
-            .with_steady_state_calculation()
-            .with_numerical_options(NumericalOptions().set_number_of_cores(20))
-            .disable_fluid_flow_marangoni()
-            .with_material_properties(mp)
-            .with_mesh(Mesh().coarse())
-        )
-        am_calculator.set_ambient_temperature(AMBIENT_TEMPERATURE)
-        am_calculator.set_base_plate_temperature(AMBIENT_TEMPERATURE)
+        sorted_idx = np.argsort(-J)[:3]  # only top 3 candidates
+        d_next = w_next = l_next = None
+        x_next = None
 
-        # New heat source each time
-        heat_source = HeatSource.from_library(HEAT_SOURCE_NAME)
-        heat_source.set_power(float(x_next[0, 0].item()))
-        heat_source.set_scanning_speed(float(x_next[0, 1].item()) / 1e3)
-        am_calculator.with_heat_source(heat_source)
+        for ind in sorted_idx:
+            try:
+                x_next = Xgrid[ind:ind+1]
 
-        result: SteadyStateResult = am_calculator.calculate()
+                # New calculator each time
+                am_calculator = (
+                    start.with_additive_manufacturing()
+                    .with_steady_state_calculation()
+                    .with_numerical_options(NumericalOptions().set_number_of_cores(20))
+                    .disable_fluid_flow_marangoni()
+                    .with_material_properties(mp)
+                    .with_mesh(Mesh().coarse())
+                )
+                am_calculator.set_ambient_temperature(AMBIENT_TEMPERATURE)
+                am_calculator.set_base_plate_temperature(AMBIENT_TEMPERATURE)
 
-        d_next = float(result.get_meltpool_depth()) * 1e6
-        w_next = float(result.get_meltpool_width()) * 1e6
-        l_next = float(result.get_meltpool_length()) * 1e6
+                # New heat source each time
+                heat_source = HeatSource.from_library(HEAT_SOURCE_NAME)
+                heat_source.set_power(float(x_next[0, 0].item()))
+                heat_source.set_scanning_speed(float(x_next[0, 1].item()) / 1e3)
+                am_calculator.with_heat_source(heat_source)
+
+                result: SteadyStateResult = am_calculator.calculate()
+
+                d_next = float(result.get_meltpool_depth()) * 1e6
+                w_next = float(result.get_meltpool_width()) * 1e6
+                l_next = float(result.get_meltpool_length()) * 1e6
+
+                # success, stop fallback loop
+                break
+
+            except tc_python.exceptions.CalculationException:
+                print(f"[iter {it+1}] Thermo-Calc failed at candidate {ind}, trying next-best...")
+                continue  # try next-best
+
+        if x_next is None or d_next is None:
+            print(f"[iter {it+1}] Top 3 candidates failed, skipping iteration.")
+            continue
 
         # Cleanup immediately
         del result, am_calculator, heat_source
         gc.collect()
         time.sleep(0.05)
 
-    #no more tc hehe
+    # no more tc hehe
     d_next_t = torch.tensor([[d_next]], dtype=dtype, device=device)
     w_next_t = torch.tensor([[w_next]], dtype=dtype, device=device)
     l_next_t = torch.tensor([[l_next]], dtype=dtype, device=device)
@@ -452,7 +470,8 @@ for it in range(niter):
     print(f"[iter {it+1}/{niter}] DONE: "
           f"P={float(x_next[0,0]):.2f}, V={float(x_next[0,1]):.2f}, "
           f"W={w_next:.2f}, D={d_next:.2f}, L={l_next:.2f}")
-    #plot every 5 iters
+
+    # plot every 5 iters
     if (it + 1) % 5 == 0 or it == niter-1:
         with torch.no_grad():
             gpw, gpd, gpl = gp_models["Width"], gp_models["Depth"], gp_models["Length"]
