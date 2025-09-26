@@ -531,3 +531,11 @@ while success_it < niter:
         plt.close('all')  # erase figure to free memory
 
 preds, rmses = evaluate_gp_models(gp_models, X[:len(Y_targets["Depth"])], Y_targets, n_samples=10, label="After Active Learning")
+X_probe = torch.tensor([
+    [60, 1200],  # point 1: [power, speed]
+    [80, 2800.0],  # point 2
+    [100, 400]   # point 3
+], dtype=dtype, device=device)
+
+# Evaluate
+probe_preds, _ = evaluate_gp_models(gp_models, X_probe, label="Probe Points")
