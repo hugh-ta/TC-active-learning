@@ -226,60 +226,63 @@ def _evaluate_point_worker(i, meanw_np, stdw_np, meanl_np, stdl_np, meand_np, st
     probs = np.array([p1, p2, p3, p4], dtype=float)
     probs = np.clip(probs, 1e-12, 1 - 1e-12)
     H = -(probs * np.log(probs)).sum()
+
+    # Include joint standard deviation like ACS debug version
     joint_std = float(stdw_np[i] * stdl_np[i] * stdd_np[i])
-    return float(H) 
+    return float(H * joint_std)
 # JOINT STD IS GONE FOR NOW!!!
-def entropy_sigma(X, gps, constraints, thickness, Xtrain=None, mode="MC", nmc=8, n_cores=1):
+def entropy_sigma_improved(X, gps, constraints, thickness, Xtrain=None, mode="MC", nmc=64, alpha_dist=0.1, top_k=5):
+
     gpw, gpl, gpd = gps
     c1, c2, c3 = constraints
     N = X.shape[0]
 
+    jitter = 1e-9
+
+    # GP posteriors
     with torch.no_grad():
-        postw = gpw.posterior(X)
-        meanw = postw.mean.squeeze(-1)
-        stdw = postw.variance.sqrt().squeeze(-1).clamp(min=1e-6)
-
-        postl = gpl.posterior(X)
-        meanl = postl.mean.squeeze(-1)
-        stdl = postl.variance.sqrt().squeeze(-1).clamp(min=1e-6)
-
-        postd = gpd.posterior(X)
-        meand = postd.mean.squeeze(-1)
-        stdd = postd.variance.sqrt().squeeze(-1).clamp(min=1e-6)
+        postw = gpw.posterior(X); meanw = postw.mean.squeeze(-1); stdw = postw.variance.sqrt().squeeze(-1).clamp(min=1e-6)
+        postl = gpl.posterior(X); meanl = postl.mean.squeeze(-1); stdl = postl.variance.sqrt().squeeze(-1).clamp(min=1e-6)
+        postd = gpd.posterior(X); meand = postd.mean.squeeze(-1); stdd = postd.variance.sqrt().squeeze(-1).clamp(min=1e-6)
 
     meanw_np, stdw_np = meanw.cpu().numpy(), stdw.cpu().numpy()
     meanl_np, stdl_np = meanl.cpu().numpy(), stdl.cpu().numpy()
     meand_np, stdd_np = meand.cpu().numpy(), stdd.cpu().numpy()
 
+    # MC sampling
     with torch.no_grad():
         samplew = gpw.posterior(X).rsample(torch.Size([nmc])).squeeze(-1).cpu().numpy()
         samplel = gpl.posterior(X).rsample(torch.Size([nmc])).squeeze(-1).cpu().numpy()
         sampled = gpd.posterior(X).rsample(torch.Size([nmc])).squeeze(-1).cpu().numpy()
 
+    # Compute acquisition per point
+    J = np.zeros(N)
     for i in range(N):
-        val = _evaluate_point_worker(
-            i,
-            meanw_np, stdw_np,
-            meanl_np, stdl_np,
-            meand_np, stdd_np,
-            samplew, samplel, sampled,
-            c1, c2, c3,
-            thickness, mode
-        )
+        sw, sl, sd = samplew[:, i], samplel[:, i], sampled[:, i]
 
-        if USE_EDGE_PENALTY and Xtrain is not None:
-            # compute distance to nearest training point
-            dists = np.linalg.norm(X[i].cpu().numpy() - Xtrain.cpu().numpy(), axis=1)
-            min_dist = dists.min()
+        keyholing = (sw / (sd + jitter)) < c1
+        lof = ((sd + jitter) / (thickness + jitter)) < c2
+        balling = (sl / (sw + jitter)) > c3
 
-            # flipped penalty: downweight far-away points instead of boosting them
-            alpha = 1.0  # tune between ~0.5–2.0 depending on how hard you want to suppress edges
-            val = val / (1.0 + alpha * min_dist)
+        p1, p2, p3 = float(np.mean(keyholing)), float(np.mean(lof)), float(np.mean(balling))
+        p4 = max(1.0 - (p1 + p2 + p3), 1e-12)
+        probs = np.array([p1, p2, p3, p4])
+        probs = np.clip(probs, 1e-12, 1-1e-12)
+        H = -(probs * np.log(probs)).sum()
 
-        results.append(val)
+        # sum of per-output std instead of product
+        total_std = float(stdw_np[i] + stdl_np[i] + stdd_np[i])
+        J[i] = H * total_std
 
+    # Distance penalty to encourage exploration
+    if Xtrain is not None:
+        Xtrain_np = Xtrain.cpu().numpy()
+        dists = np.min(np.linalg.norm(X[:, None, :].cpu().numpy() - Xtrain_np[None, :, :], axis=-1), axis=1)
+        J *= (1 + alpha_dist * dists)
 
-    return np.array(results)
+    # Return sorted top-k candidates for diversified AL
+    top_indices = np.argsort(-J)[:top_k]  # top-k
+    return J, top_indices
 
 def plot_mc_defect_map(labels_grid, powergrid, velogrid, use_balling=USE_BALLING, alpha_defects=0.7, J=None, iteration=None):
 
@@ -416,17 +419,20 @@ while success_it < niter:
 
         # Pick next x with top-3 fallback
         gps = [gp_models["Width"], gp_models["Depth"], gp_models["Length"]]
-        J = entropy_sigma(
+        J, top_candidates = entropy_sigma_improved(
             Xgrid,
-            gps,
-            constraints,
+            gps=[gp_models["Width"], gp_models["Length"], gp_models["Depth"]],
+            constraints=constraints,
             thickness=thickness,
-            Xtrain=X,   
+            Xtrain=X,
             mode="MC",
-            nmc=nmc
-            )
+            nmc=nmc,
+            alpha_dist=0.1,
+            top_k=5
+        )
 
-        sorted_idx = np.argsort(-J)[:3]  # only top 3 candidates
+        # pick candidates in order for top-3 fallback
+        sorted_idx = top_candidates[:3]
         d_next = w_next = l_next = None
         x_next = None
 
