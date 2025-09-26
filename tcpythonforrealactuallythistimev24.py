@@ -44,8 +44,8 @@ device = torch.device("cpu")
 thickness = 10
 ntrain = 10
 niter = 20 #how many AL loops after  training are allowed
-restarts = 5
-ngrid= 50
+restarts = 10
+ngrid= 100
 nmc = 64
 edensity_low = 0
 edensity_high =10000000
@@ -530,4 +530,4 @@ while success_it < niter:
         )
         plt.close('all')  # erase figure to free memory
 
-preds, rmses = evaluate_gp_models(gp_models, X, Y_targets, n_samples=10, label="After Active Learning")
+preds, rmses = evaluate_gp_models(gp_models, X[:len(Y_targets["Depth"])], Y_targets, n_samples=10, label="After Active Learning")
