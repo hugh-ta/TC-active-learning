@@ -19,7 +19,7 @@ dtype = 'float32'
 thickness = 10  # microns
 
 # import data
-data = pd.read_csv('25test.csv')
+data = pd.read_csv('results_progress.csv')
 
 # replace 0 values in Depth to avoid division by zero
 data["Depth"] = data["Depth"].replace(0, 1e-6)
