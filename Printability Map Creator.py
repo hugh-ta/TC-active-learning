@@ -12,6 +12,7 @@ import matplotlib.colors as mcolors
 # toggles
 PLOT_MODE = "OVERLAY_POINTS"  # options: "INTERPOLATED", "RAW_POINTS", "OVERLAY_POINTS"
 USE_BALLING = True            # toggle Balling 
+USE_INTERPOLATION = False      # toggle interpolation
 sigma = 1                     # Gaussian smoothing
 
 dtype = 'float32'
@@ -82,12 +83,12 @@ def classify_grid(width_grid, depth_grid, thickness, ed_grid, length_grid=None):
 
 # make grids
 def make_grids():
-    if PLOT_MODE in ["INTERPOLATED", "OVERLAY_POINTS"]:
+    if USE_INTERPOLATION:
         grid_x = np.linspace(speed.min(), speed.max(), 200)
         grid_y = np.linspace(power.min(), power.max(), 200)
         xi, yi = np.meshgrid(grid_x, grid_y)
-        width_grid = griddata((x, y), width, (xi, yi), method='linear')
-        depth_grid = griddata((x, y), depth, (xi, yi), method='linear')
+        width_grid = griddata((x, y), width, (xi, yi), method='cubic')
+        depth_grid = griddata((x, y), depth, (xi, yi), method='cubic')
         ed_grid = griddata((x, y), edensity, (xi, yi), method='cubic')
         length_grid = griddata((x, y), length, (xi, yi), method='cubic') if length is not None else None
         z_hmax_grid = griddata((x, y), z_hmax, (xi, yi), method='cubic')
@@ -97,12 +98,29 @@ def make_grids():
         if length_grid is not None:
             length_grid = gaussian_filter(length_grid, sigma=sigma)
     else:
-        xi, yi = x.reshape(-1,1), y.reshape(-1,1)
-        width_grid = width.reshape(-1,1)
-        depth_grid = depth.reshape(-1,1)
-        ed_grid = edensity.reshape(-1,1)
-        length_grid = length.reshape(-1,1) if length is not None else None
-        z_hmax_grid = z_hmax.reshape(-1,1)
+        # build a raw rectangular grid from data
+        grid_x = np.sort(data["Speed"].unique())
+        grid_y = np.sort(data["Power"].unique())
+        xi, yi = np.meshgrid(grid_x, grid_y)
+
+        pivot = data.pivot(index="Power", columns="Speed", values="Width")
+        width_grid = pivot.values
+
+        pivot = data.pivot(index="Power", columns="Speed", values="Depth")
+        depth_grid = pivot.values
+
+        pivot = data.pivot(index="Power", columns="Speed", values="P/v")
+        ed_grid = pivot.values
+
+        if length is not None:
+            pivot = data.pivot(index="Power", columns="Speed", values="Length")
+            length_grid = pivot.values
+        else:
+            length_grid = None
+
+        pivot = data.pivot(index="Power", columns="Speed", values="hmax")
+        z_hmax_grid = pivot.values
+
     return xi, yi, width_grid, depth_grid, ed_grid, length_grid, z_hmax_grid
 
 xi, yi, width_grid, depth_grid, ed_grid, length_grid, z_hmax_grid = make_grids()
@@ -137,15 +155,28 @@ elif PLOT_MODE == "RAW_POINTS":
     colors = [color_map[d[0]] for d in defect_grid] if defect_grid.ndim==2 else [color_map[d] for d in defect_grid.flatten()]
     plt.scatter(x, y, c=colors, s=50, edgecolors='k')
 elif PLOT_MODE == "OVERLAY_POINTS":
-    plt.imshow(rgb_grid, extent=[x.min(), x.max(), y.min(), y.max()], origin="lower", aspect="auto", zorder=1)
-    color_map = {"Keyhole": "#E07B7B", "Lack of Fusion": "#7bbfc8", "Good": "#FFFFFF", "Balling": "#289C8E"}
-    raw_defects = classify_grid(width.reshape(-1,1), depth.reshape(-1,1), thickness,
-                                edensity.reshape(-1,1), length.reshape(-1,1) if length is not None else None)
-    colors = [color_map[d[0]] for d in raw_defects]
-    plt.scatter(x, y, c=colors, s=50, edgecolors='k', zorder=2)
-    levels = [5] + list(range(25, int(np.ceil(z_hmax.max())) + 1, 25))
-    contours = plt.contour(xi, yi, z_hmax_grid, levels=levels, colors='black', linewidths=1, zorder=3)
+    # always plot background map
+    plt.imshow(rgb_grid,
+               extent=[xi.min(), xi.max(), yi.min(), yi.max()],
+               origin="lower",
+               aspect="auto",
+               zorder=1)
+
+    # always add contours (interpolated or pivot-based)
+    levels = [5] + list(range(25, int(np.ceil(z_hmax_grid[~np.isnan(z_hmax_grid)].max())) + 1, 25))
+    contours = plt.contour(xi, yi, z_hmax_grid, levels=levels, colors='black', linewidths=1, zorder=2)
     plt.clabel(contours, inline=True, fontsize=8, fmt='%d')
+
+    # then scatter raw experimental points
+    color_map = {"Keyhole": "#E07B7B",
+                 "Lack of Fusion": "#7bbfc8",
+                 "Good": "#FFFFFF",
+                 "Balling": "#289C8E"}
+    raw_defects = classify_grid(width.reshape(-1,1), depth.reshape(-1,1), thickness,
+                                edensity.reshape(-1,1),
+                                length.reshape(-1,1) if length is not None else None)
+    colors = [color_map[d[0]] for d in raw_defects]
+    plt.scatter(x, y, c=colors, s=50, edgecolors='k', zorder=3)
 
 plt.xlabel("Scan Velocity (mm/s)")
 plt.ylabel("Laser Power (W)")

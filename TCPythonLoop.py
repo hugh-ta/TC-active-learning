@@ -207,30 +207,7 @@ evaluate_gp_models(gp_models, X, Y_targets, n_samples=10, label="After Sobol tra
 evaluate_gp_models(gp_models, X, Y_targets, n_samples=10, label="After training")
 
 #def acquisiton func and helpers
-def _evaluate_point_worker(i, meanw_np, stdw_np, meanl_np, stdl_np, meand_np, stdd_np,
-                           samplew_np, samplel_np, sampled_np, c1, c2, c3, thickness,
-                           mode):
-    jitter = 1e-9
-    if mode == "MC":
-        sw = samplew_np[:, i]; sl = samplel_np[:, i]; sd = sampled_np[:, i]
-        keyholing = (sw / (sd + jitter)) < c1
-        lof = ((sd + jitter) / (thickness + jitter)) < c2
-        balling = (sl / (sw + jitter)) > c3
-        p1, p2, p3 = float(np.mean(keyholing)), float(np.mean(lof)), float(np.mean(balling))
-        p4 = max(1.0 - (p1 + p2 + p3), 1e-12)
-    elif mode == "Blind":
-        p1, p2, p3, p4 = 0.0, 0.0, 0.0, 1.0
-    else:
-        raise ValueError("Unknown mode")
 
-    probs = np.array([p1, p2, p3, p4], dtype=float)
-    probs = np.clip(probs, 1e-12, 1 - 1e-12)
-    H = -(probs * np.log(probs)).sum()
-
-    # Include joint standard deviation like ACS debug version
-    joint_std = float(stdw_np[i] * stdl_np[i] * stdd_np[i])
-    return float(H * joint_std)
-# JOINT STD IS GONE FOR NOW!!!
 def entropy_sigma_improved(X, gps, constraints, thickness, Xtrain=None, mode="MC", nmc=64, alpha_dist=0.1, top_k=5):
 
     gpw, gpl, gpd = gps
@@ -343,29 +320,6 @@ def plot_mc_defect_map(labels_grid, powergrid, velogrid, use_balling=USE_BALLING
     plt.show()
 
 # plug that into tc and stuff or whatever
-def run_thermocalc(power, speed, am_calculator, heat_source, mp, wait_time=5, max_retries=5):
-    heat_source.set_power(float(power))
-    heat_source.set_scanning_speed(float(speed) / 1e3)  # mm/s → m/s
-
-    retries = 0
-    while True:
-        try:
-            result: SteadyStateResult = am_calculator.calculate()  # blocks until done
-            break
-        except UnrecoverableCalculationException:
-            retries += 1
-            if retries > max_retries:
-                raise RuntimeError(f"TC failed after {max_retries} retries.")
-            print(f"TC busy or internal server error, retrying in {wait_time}s... (Attempt {retries})")
-            time.sleep(wait_time)
-
-    return {
-        "power": power,
-        "speed": speed,
-        "Depth": result.get_meltpool_depth() * 1e6,   # µm
-        "Width": result.get_meltpool_width() * 1e6,
-        "Length": result.get_meltpool_length() * 1e6,
-    }
 ## main active learning loop
 # initialized TC
 with TCPython(logging_policy=LoggingPolicy.SCREEN) as start:
