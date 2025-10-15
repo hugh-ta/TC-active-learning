@@ -11,6 +11,7 @@ from scipy.interpolate import griddata
 from torch import nn
 from tqdm import tqdm
 import json
+import joblib  # Added for saving the scaler object
 
 from botorch.models import SingleTaskGP
 from botorch.fit import fit_gpytorch_mll
@@ -119,7 +120,6 @@ class ExactGPModel(gpytorch.models.ExactGP):
 # ==============================================================================
 # 2. MAIN PROCESSING LOOP
 # ==============================================================================
-# This loop will run the entire analysis for each target variable.
 for target_output in TARGET_VARIABLES:
 
     print("\n" + "#"*80)
@@ -130,8 +130,14 @@ for target_output in TARGET_VARIABLES:
     TRAIN_X, TRAIN_Y, TEST_X, TEST_Y_TRUE, SCALER, FULL_X, FULL_Y = load_and_process_data(
         FILEPATH, INPUT_FEATURES, target_output
     )
+    
+    # --- ADDED: Save the scaler for use in the active learning script ---
+    scaler_filename = f"scaler_for_{target_output}.save"
+    joblib.dump(SCALER, scaler_filename)
+    print(f"--- Scaler for '{target_output}' saved to '{scaler_filename}' ---")
 
-    # --- Step 2: Define Objective functions that use the current data ---
+
+    # --- Step 2: Define Objective functions that use the train/test split ---
     def evaluate_deep_kernel(parameterization):
         lr, weight, ls_1, ls_2, noise = parameterization
         model = DeepGPModel(TRAIN_X, TRAIN_Y, GaussianLikelihood(), FeatureExtractor())
@@ -202,7 +208,7 @@ for target_output in TARGET_VARIABLES:
     best_params_custom = train_x_custom[train_y_custom.argmax()]
     best_params_matern = train_x_matern[train_y_matern.argmax()]
 
-    # <<< MODIFICATION: Prepare the full dataset for the final training run >>>
+    # Prepare the full dataset for the final training run
     FULL_X_SCALED = torch.from_numpy(SCALER.transform(FULL_X))
     FULL_Y_TORCH = torch.from_numpy(FULL_Y)
 
@@ -252,8 +258,6 @@ for target_output in TARGET_VARIABLES:
     x2_grid = np.linspace(FULL_X[:, 1].min(), FULL_X[:, 1].max(), 50)
     X1, X2 = np.meshgrid(x1_grid, x2_grid)
     
-    # <<< MODIFICATION: Use the actual full data for the ground truth plot, not an interpolation >>>
-    # This provides a more accurate visualization of the true data surface
     Z_truth = griddata(FULL_X, FULL_Y, (X1, X2), method='cubic') 
     
     grid_torch = torch.from_numpy(SCALER.transform(np.vstack([X1.ravel(), X2.ravel()]).T))
