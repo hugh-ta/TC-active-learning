@@ -76,7 +76,7 @@ except FileNotFoundError:
 #import the data 
 data = pd.read_csv(file_name)
 
-## CORRECTED SHAPE: Restored .reshape(-1, 1) to ensure Y targets are 2D
+# REVERTED TO YOUR ORIGINAL, CORRECT SHAPES
 depth  = data["Depth"].values.reshape(-1, 1)
 width  = data["Width"].values.reshape(-1, 1)
 length = data["Length"].values.reshape(-1, 1)
@@ -106,7 +106,7 @@ Y_targets = {
 d = X.shape[1]
 m= Yd.shape[1]
 
-## Define DKL Model Components (must match the saved models)
+# NEW: Define the necessary DKL structures
 class FeatureExtractor(nn.Sequential):
     def __init__(self):
         super(FeatureExtractor, self).__init__()
@@ -116,7 +116,6 @@ class FeatureExtractor(nn.Sequential):
         self.add_module('relu2', nn.ReLU())
         self.add_module('linear3', nn.Linear(50, 2))
 
-## DKL WRAPPER KERNEL
 class PreTrainedDKLKernel(Kernel):
     def __init__(self, feature_extractor, base_kernel):
         super(PreTrainedDKLKernel, self).__init__()
@@ -127,6 +126,7 @@ class PreTrainedDKLKernel(Kernel):
         projected_x1 = self.feature_extractor(x1)
         projected_x2 = self.feature_extractor(x2)
         return self.base_kernel.forward(projected_x1, projected_x2, diag=diag, **params)
+
 
 #def funcs
 def evaluate_gp_models(gp_models, X, Y_targets, n_samples=10, label=""):
@@ -235,13 +235,14 @@ for task, Y_target in Y_targets.items():
     
     dkl_kernel = PreTrainedDKLKernel(feature_extractor, base_kernel)
     
-    # Y_target is now correctly shaped as [n_points, 1]
+    # CORRECTED MODEL DEFINITION
+    # Removed the `outcome_transform` because the DKL kernel was trained on raw data.
+    # This prevents internal conflicts and uses the kernel as intended.
     model = SingleTaskGP(
         train_X=X,
-        train_Y=Y_target,
+        train_Y=Y_target, # Y_target is correctly shaped [n_points, 1]
         covar_module=dkl_kernel,
-        likelihood=likelihood,
-        outcome_transform=Standardize(m=1) # Standardize the single output
+        likelihood=likelihood
     )
     gp_models[task] = model
 
@@ -457,7 +458,7 @@ while success_it < niter:
         time.sleep(0.05)
 
     # no more tc hehe
-    ## CORRECTED SHAPE: Create 2D tensors of shape [1, 1] for the new points
+    # CORRECTED SHAPE: Create 2D tensors of shape [1, 1] for the new points
     d_next_t = torch.tensor([[d_next]], dtype=dtype, device=device)
     w_next_t = torch.tensor([[w_next]], dtype=dtype, device=device)
     l_next_t = torch.tensor([[l_next]], dtype=dtype, device=device)
