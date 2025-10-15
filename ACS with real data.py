@@ -65,6 +65,7 @@ Yd= torch.tensor (dfdepth, dtype=dtype, device=DEVICE)
 
 #train GPs
 def TrainGP(X,Y, nu = 2.5): #nu =1.5 -> matern 3/2, nu 2.5=5/2 #def make_model(X, Y, nu=2.5, fixed_noise_std=True) if we wanted to include noise
+    
     kernel = ScaleKernel(base_kernel= MaternKernel(nu=nu, ard_num_dims= 2)) # 2 because we have 2 inputs, ard allows for different length scales for different parameters
     model = SingleTaskGP(train_X=X, train_Y=Y, covar_module=kernel, input_transform= Normalize(d=X.shape[-1]), outcome_transform= Standardize(m=Y.shape[-1])) #ARD = automated revelance detection
     return model

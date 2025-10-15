@@ -1,0 +1,546 @@
+## import libs
+# common libs
+import numpy as np
+import pandas as pd
+import torch
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+import matplotlib.colors as mcolors
+import tqdm
+from matplotlib import colors
+import gc, time
+
+# GPyTorch
+from gpytorch.kernels import MaternKernel, ScaleKernel
+from gpytorch.mlls import ExactMarginalLogLikelihood
+from gpytorch.models import ExactGP
+from gpytorch.likelihoods import GaussianLikelihood
+from gpytorch.means import ConstantMean
+from gpytorch.distributions import MultivariateNormal
+from torch import nn
+
+
+# BoTorch
+from botorch.models import SingleTaskGP
+from botorch.models.transforms import Normalize, Standardize
+from botorch.fit import fit_gpytorch_mll
+from botorch.utils.sampling import draw_sobol_samples
+
+#scipy
+from scipy.interpolate import griddata
+from scipy.stats import norm
+
+
+#tcpython
+from tc_python import *
+
+
+# user settings and toggles
+HEAT_SOURCE_NAME = "Double ellipsoidal - 316L - beam d 15um"
+MATERIAL_NAME = "SS316L"
+POWDER_THICKNESS = 10.0  # in micro-meter
+HATCH_DISTANCE = 10.0  # in micro-meter. Only single track experiment but let's use a hatch spacing for the printability map
+AMBIENT_TEMPERATURE = 353  # in K, as given in the paper
+USE_BALLING = True
+USE_EDENSITY   = False  
+USE_EDGE_PENALTY = True
+dtype = torch.double
+device = torch.device("cpu")
+thickness = 10
+ntrain = 10
+niter = 20 #how many AL loops after  training are allowed
+restarts = 10
+ngrid= 100
+nmc = 64
+edensity_low = 0
+edensity_high =10000000
+file_name = "results_progress.csv"
+SEED = 8
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+keyholing = 1.9
+lof = 1.5
+balling = 4.35
+
+constraints = [keyholing, lof, balling]
+
+#store the runs and stuff!
+CSV_FILE = "active_learning_runs.csv"
+try:
+    df = pd.read_csv(CSV_FILE)
+except FileNotFoundError:
+    df = pd.DataFrame(columns=["power", "speed", "Depth", "Width", "Length"])
+    df.to_csv(CSV_FILE, index=False)
+
+#import the data 
+data = pd.read_csv(file_name)
+
+depth  = data["Depth"].values.reshape(-1, 1)
+width  = data["Width"].values.reshape(-1, 1)
+length = data["Length"].values.reshape(-1, 1)
+power  = data["Power"].values.reshape(-1, 1)
+speed  = data["Speed"].values.reshape(-1, 1)
+
+# total number of data points
+n_total = len(data)
+
+# pick ntrain indices randomly from the actual data
+initial_idx = np.random.choice(n_total, size=ntrain, replace=False)
+
+# training inputs
+X = torch.tensor(np.column_stack([power[initial_idx], speed[initial_idx]]), dtype=dtype, device=device)
+
+# training outputs
+Yd = torch.tensor(depth[initial_idx], dtype=dtype, device=device)
+Yw = torch.tensor(width[initial_idx], dtype=dtype, device=device)
+Yl = torch.tensor(length[initial_idx], dtype=dtype, device=device)
+
+# make dict for easier access
+Y_targets = {
+    "Depth": Yd,
+    "Width": Yw,
+    "Length": Yl,
+}
+d = X.shape[1]
+m= Yd.shape[1]
+
+## Define DKL Model Structure (must match the saved models)
+class FeatureExtractor(nn.Sequential):
+    def __init__(self):
+        super(FeatureExtractor, self).__init__()
+        self.add_module('linear1', nn.Linear(2, 100))
+        self.add_module('relu1', nn.ReLU())
+        self.add_module('linear2', nn.Linear(100, 50))
+        self.add_module('relu2', nn.ReLU())
+        self.add_module('linear3', nn.Linear(50, 2))
+
+class DeepGPModel(ExactGP):
+    def __init__(self, train_x, train_y, likelihood, feature_extractor):
+        super(DeepGPModel, self).__init__(train_x, train_y, likelihood)
+        self.feature_extractor = feature_extractor
+        self.mean_module = ConstantMean()
+        self.covar_module = ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=2))
+    def forward(self, x):
+        projected_x = self.feature_extractor(x)
+        mean_x = self.mean_module(projected_x)
+        covar_x = self.covar_module(projected_x)
+        return MultivariateNormal(mean_x, covar_x)
+
+
+#def funcs
+def evaluate_gp_models(gp_models, X, Y_targets, n_samples=10, label=""):
+    preds, rmses = {}, {}
+
+    for task, gp in gp_models.items():
+        gp.eval()
+        with torch.no_grad():
+            posterior = gp.posterior(X)
+            y_pred = posterior.mean.cpu().numpy().ravel()
+            # Y_targets might be None for probe points
+            if Y_targets is not None:
+                y_true = Y_targets[task].cpu().numpy().ravel()
+                rmses[task] = np.sqrt(np.mean((y_pred - y_true) ** 2))
+            preds[task] = y_pred
+
+
+    print(f"\n=== Evaluation {label} ===")
+    if rmses:
+        print("RMSE per task:")
+        for t, r in rmses.items():
+            print(f"  {t}: {r:.3f}")
+
+    print("\nSample predictions:")
+    for i in range(min(n_samples, len(X))):
+        if Y_targets is not None:
+            true_vals = [f"{Y_targets[t][i].item():.2f}" for t in ["Depth", "Width", "Length"]]
+            pred_vals = [f"{preds[t][i]:.2f}" for t in ["Depth", "Width", "Length"]]
+            print(f"  True: {true_vals} | Pred: {pred_vals}")
+        else:
+            pred_vals = [f"{preds[t][i]:.2f}" for t in ["Depth", "Width", "Length"]]
+            print(f"  Probe Point {i+1} Pred: {pred_vals}")
+
+
+    return preds, rmses
+def classify_defect(width, depth, e, length=None, thickness=10, ed_low=edensity_low, ed_high=edensity_high):
+    jitter = 1e-9
+    if e is not None:
+        if e < ed_low:
+            return "Lack of Fusion"
+        elif e > ed_high:
+            return "Keyhole"
+    if (depth + jitter) == 0:
+        return "Lack of Fusion"
+    if width / (depth + jitter) < 1.5:
+        return "Keyhole"
+    elif (depth + jitter) / (thickness + jitter) < 1.9:
+        return "Lack of Fusion"
+    if USE_BALLING and (length is not None):
+        if width / (length + jitter) < 0.23:
+            return "Balling"
+    return "Good"
+
+def classify_grid(width_grid, depth_grid, thickness, ed_grid, length_grid=None):
+    result = np.empty_like(width_grid, dtype=object)
+    for i in range(width_grid.shape[0]):
+        for j in range(width_grid.shape[1]):
+            w = width_grid[i,j]
+            d = depth_grid[i,j]
+            e = ed_grid[i,j] if ed_grid is not None else None
+            l = length_grid[i,j] if length_grid is not None else None
+            if np.isnan(w) or np.isnan(d) or (USE_EDENSITY and (e is None or np.isnan(e))) or (USE_BALLING and length_grid is not None and np.isnan(l)):
+                result[i,j] = "Good"
+            else:
+                result[i,j] = classify_defect(w, d, e, l, thickness)
+    return result
+
+def classify_defect_mc(width_samples, depth_samples, e_samples=None, length_samples=None, thickness=10):
+
+    n_mc, n_points = width_samples.shape
+    labels = np.empty(n_points, dtype=object)
+
+    for i in range(n_points):
+        mc_labels = []
+        w_s = width_samples[:, i]
+        d_s = depth_samples[:, i]
+        e_s = e_samples[:, i] if e_samples is not None else None
+        l_s = length_samples[:, i] if length_samples is not None else None
+
+        for j in range(n_mc):
+            l = l_s[j] if l_s is not None else None
+            e = e_s[j] if e_s is not None else None
+            # classify defect
+            if USE_EDENSITY:
+                mc_labels.append(classify_defect(w_s[j], d_s[j], e, l, thickness))
+            else:
+                mc_labels.append(classify_defect(w_s[j], d_s[j], None, l, thickness))
+        # most frequent label
+        labels[i] = max(set(mc_labels), key=mc_labels.count)
+
+    return labels
+
+## Load Pre-Trained DKL Models
+gp_models = {}
+print("--- Loading pre-trained DKL kernels ---")
+for task, Y_target in Y_targets.items():
+    # Instantiate a fresh model structure
+    feature_extractor = FeatureExtractor()
+    likelihood = GaussianLikelihood()
+    model = DeepGPModel(X, Y_target, likelihood, feature_extractor)
+
+    # Construct filename and load the saved state dictionary
+    model_path = f"dkl_kernel_for_{task}.pth"
+    print(f"  Loading model for '{task}' from '{model_path}'...")
+    state_dict = torch.load(model_path)
+    model.load_state_dict(state_dict)
+
+    # Freeze the feature extractor and kernel to preserve the learned mapping
+    for param in model.feature_extractor.parameters():
+        param.requires_grad = False
+    for param in model.covar_module.parameters():
+        param.requires_grad = False
+    
+    # IMPORTANT: The likelihood's noise is left trainable for fine-tuning
+    model.likelihood.train()
+    
+    gp_models[task] = model
+
+print("--- Pre-trained models loaded and core parameters frozen. ---")
+
+
+evaluate_gp_models(gp_models, X, Y_targets, n_samples=10, label="After loading pre-trained models")
+
+#def acquisiton func and helpers
+
+def entropy_sigma_improved(X, gps, constraints, thickness, Xtrain=None, mode="MC", nmc=64, alpha_dist=0.1, top_k=5):
+
+    gpw, gpl, gpd = gps
+    c1, c2, c3 = constraints
+    N = X.shape[0]
+
+    jitter = 1e-9
+
+    # GP posteriors
+    with torch.no_grad():
+        postw = gpw.posterior(X); meanw = postw.mean.squeeze(-1); stdw = postw.variance.sqrt().squeeze(-1).clamp(min=1e-6)
+        postl = gpl.posterior(X); meanl = postl.mean.squeeze(-1); stdl = postl.variance.sqrt().squeeze(-1).clamp(min=1e-6)
+        postd = gpd.posterior(X); meand = postd.mean.squeeze(-1); stdd = postd.variance.sqrt().squeeze(-1).clamp(min=1e-6)
+
+    meanw_np, stdw_np = meanw.cpu().numpy(), stdw.cpu().numpy()
+    meanl_np, stdl_np = meanl.cpu().numpy(), stdl.cpu().numpy()
+    meand_np, stdd_np = meand.cpu().numpy(), stdd.cpu().numpy()
+
+    # MC sampling
+    with torch.no_grad():
+        samplew = gpw.posterior(X).rsample(torch.Size([nmc])).squeeze(-1).cpu().numpy()
+        samplel = gpl.posterior(X).rsample(torch.Size([nmc])).squeeze(-1).cpu().numpy()
+        sampled = gpd.posterior(X).rsample(torch.Size([nmc])).squeeze(-1).cpu().numpy()
+
+    # Compute acquisition per point
+    J = np.zeros(N)
+    for i in range(N):
+        sw, sl, sd = samplew[:, i], samplel[:, i], sampled[:, i]
+
+        keyholing = (sw / (sd + jitter)) < c1
+        lof = ((sd + jitter) / (thickness + jitter)) < c2
+        balling = (sl / (sw + jitter)) > c3
+
+        p1, p2, p3 = float(np.mean(keyholing)), float(np.mean(lof)), float(np.mean(balling))
+        p4 = max(1.0 - (p1 + p2 + p3), 1e-12)
+        probs = np.array([p1, p2, p3, p4])
+        probs = np.clip(probs, 1e-12, 1-1e-12)
+        H = -(probs * np.log(probs)).sum()
+
+        # sum of per-output std instead of product
+        total_std = float(stdw_np[i] + stdl_np[i] + stdd_np[i])
+        J[i] = H * total_std
+
+    # Distance penalty to encourage exploration
+    if Xtrain is not None:
+        Xtrain_np = Xtrain.cpu().numpy()
+        dists = np.min(np.linalg.norm(X[:, None, :].cpu().numpy() - Xtrain_np[None, :, :], axis=-1), axis=1)
+        J *= (1 + alpha_dist * dists)
+
+    # Return sorted top-k candidates for diversified AL
+    top_indices = np.argsort(-J)[:top_k]  # top-k
+    return J, top_indices
+
+def plot_mc_defect_map(labels_grid, powergrid, velogrid, use_balling=USE_BALLING, alpha_defects=0.7, J=None, iteration=None):
+
+    if J is not None:
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        ax_defect, ax_acq = axes
+    else:
+        fig, ax_defect = plt.subplots(figsize=(10,7))
+        ax_acq = None
+
+    #print map yurrr
+    label_to_num = {"Good": 0, "Keyhole": 1, "Lack of Fusion": 3, "Balling": 2}
+    defect_numeric_grid = np.vectorize(label_to_num.get)(labels_grid)
+
+    red = np.array([224, 123, 123]) / 255  # Keyhole
+    blue = np.array([123, 191, 200]) / 255  # Lack of Fusion
+    green = np.array([40, 156, 142]) / 255  # Balling
+
+    rgb_grid = np.ones((labels_grid.shape[0], labels_grid.shape[1], 3))
+    for i in range(3):
+        rgb_grid[..., i][defect_numeric_grid == 1] = alpha_defects*red[i] + (1-alpha_defects)*1
+        rgb_grid[..., i][defect_numeric_grid == 3] = alpha_defects*blue[i] + (1-alpha_defects)*1
+        rgb_grid[..., i][defect_numeric_grid == 2] = alpha_defects*green[i] + (1-alpha_defects)*1
+
+    ax_defect.imshow(rgb_grid, extent=[velogrid.min(), velogrid.max(), powergrid.min(), powergrid.max()],
+                       origin="lower", aspect="auto", zorder=1)
+    ax_defect.set_xlabel("Scan Velocity (mm/s)")
+    ax_defect.set_ylabel("Laser Power (W)")
+    title_defect = "316L Printability Map (Monte Carlo)"
+    if iteration is not None:
+        title_defect += f" - Iter {iteration}"
+    ax_defect.set_title(title_defect)
+
+    legend_elements = [
+        Patch(facecolor="#E07B7B", label="Keyhole W/D < 1.5"),
+        Patch(facecolor="#7bbfc8", label="Lack of Fusion D/t <1.9"),
+    ]
+    if use_balling:
+        legend_elements.append(Patch(facecolor="#289C8E", label="Balling W/L < 0.23"))
+    legend_elements.append(Patch(facecolor="#FFFFFF", edgecolor="black", label="Stable/Printable"))
+    ax_defect.legend(handles=legend_elements, loc="best")
+
+    #acq funq
+    if J is not None and ax_acq is not None:
+        grid_J = J.reshape(labels_grid.shape)
+        im = ax_acq.imshow(grid_J, origin="lower",
+                              extent=[velogrid.min(), velogrid.max(), powergrid.min(), powergrid.max()],
+                              cmap='viridis', aspect='auto')
+        ax_acq.set_xlabel("Scan Velocity (mm/s)")
+        ax_acq.set_ylabel("Laser Power (W)")
+        title_acq = "Acquisition Function"
+        if iteration is not None:
+            title_acq += f" - Iter {iteration}"
+        ax_acq.set_title(title_acq)
+        fig.colorbar(im, ax=ax_acq, label='Acquisition Value')
+
+    plt.tight_layout()
+    plt.show()
+
+# plug that into tc and stuff or whatever
+## main active learning loop
+# initialized TC
+with TCPython(logging_policy=LoggingPolicy.SCREEN) as start:
+    start.set_cache_folder("cache")  # optional, keeps results cached
+
+    # Load material properties
+    mp = MaterialProperties.from_library(MATERIAL_NAME)
+
+    # Setup AM steady-state calculator
+    am_calculator = (
+        start.with_additive_manufacturing()
+        .with_steady_state_calculation()
+        .with_numerical_options(NumericalOptions().set_number_of_cores(20))
+        .disable_fluid_flow_marangoni()
+        .with_material_properties(mp)
+        .with_mesh(Mesh().coarse())
+    )
+
+    # Set ambient/base temperatures
+    am_calculator.set_ambient_temperature(AMBIENT_TEMPERATURE)
+    am_calculator.set_base_plate_temperature(AMBIENT_TEMPERATURE)
+
+    # Load heat source
+    heat_source = HeatSource.from_library(HEAT_SOURCE_NAME)
+    am_calculator.with_heat_source(heat_source)
+
+#make grid
+# make grid for plotting and acquisition
+powermin, powermax = X[:, 0].min().item(), X[:, 0].max().item()
+velomin, velomax = X[:, 1].min().item(), X[:, 1].max().item()
+
+powergrid = np.linspace(powermin, powermax, ngrid)
+velogrid = np.linspace(velomin, velomax, ngrid)
+PP, VV = np.meshgrid(powergrid, velogrid, indexing="ij")
+
+gridpoints = np.column_stack([PP.ravel(), VV.ravel()])
+Xgrid = torch.tensor(gridpoints, dtype=dtype, device=device)
+
+# store active learning history
+gps_history = []
+Xtrain_history = []
+J_history = []
+
+# Active learning loop with top-3 fallback and only counting successful iterations
+success_it = 0  # counts successful iterations
+
+while success_it < niter:
+    with TCPython(logging_policy=LoggingPolicy.SCREEN) as start:
+        start.set_cache_folder("cache")
+        mp = MaterialProperties.from_library(MATERIAL_NAME)
+
+        # Pick next x with top-3 fallback
+        gps = [gp_models["Width"], gp_models["Depth"], gp_models["Length"]]
+        J, top_candidates = entropy_sigma_improved(
+            Xgrid,
+            gps=[gp_models["Width"], gp_models["Length"], gp_models["Depth"]],
+            constraints=constraints,
+            thickness=thickness,
+            Xtrain=X,
+            mode="MC",
+            nmc=nmc,
+            alpha_dist=0.1,
+            top_k=5
+        )
+
+        # pick candidates in order for top-3 fallback
+        sorted_idx = top_candidates[:3]
+        d_next = w_next = l_next = None
+        x_next = None
+
+        for ind in sorted_idx:
+            try:
+                x_next = Xgrid[ind:ind+1]
+
+                # New calculator each time
+                am_calculator = (
+                    start.with_additive_manufacturing()
+                    .with_steady_state_calculation()
+                    .with_numerical_options(NumericalOptions().set_number_of_cores(20))
+                    .disable_fluid_flow_marangoni()
+                    .with_material_properties(mp)
+                    .with_mesh(Mesh().coarse())
+                )
+                am_calculator.set_ambient_temperature(AMBIENT_TEMPERATURE)
+                am_calculator.set_base_plate_temperature(AMBIENT_TEMPERATURE)
+
+                # New heat source each time
+                heat_source = HeatSource.from_library(HEAT_SOURCE_NAME)
+                heat_source.set_power(float(x_next[0, 0].item()))
+                heat_source.set_scanning_speed(float(x_next[0, 1].item()) / 1e3)
+                am_calculator.with_heat_source(heat_source)
+
+                result: SteadyStateResult = am_calculator.calculate()
+
+                d_next = float(result.get_meltpool_depth()) * 1e6
+                w_next = float(result.get_meltpool_width()) * 1e6
+                l_next = float(result.get_meltpool_length()) * 1e6
+
+                # success, stop fallback loop
+                break
+
+            except tc_python.exceptions.CalculationException:
+                print(f"[trial] Thermo-Calc failed at candidate {ind}, trying next-best...")
+                continue  # try next-best
+
+        if x_next is None or d_next is None:
+            print(f"[trial] Top 3 candidates failed, retrying without incrementing iteration.")
+            continue  # do NOT increment success_it, retry
+
+        # Cleanup immediately
+        del result, am_calculator, heat_source
+        gc.collect()
+        time.sleep(0.05)
+
+    # no more tc hehe
+    d_next_t = torch.tensor([[d_next]], dtype=dtype, device=device)
+    w_next_t = torch.tensor([[w_next]], dtype=dtype, device=device)
+    l_next_t = torch.tensor([[l_next]], dtype=dtype, device=device)
+
+    X = torch.cat([X, x_next], dim=0)
+    Yd = torch.cat([Yd, d_next_t], dim=0)
+    Yw = torch.cat([Yw, w_next_t], dim=0)
+    Yl = torch.cat([Yl, l_next_t], dim=0)
+    
+    # Update master dictionary
+    Y_targets = {"Depth": Yd, "Width": Yw, "Length": Yl}
+
+    ## Update models and fine-tune likelihood
+    print("--- Fine-tuning model likelihoods with new data point ---")
+    for task, model in gp_models.items():
+        # Update the model with the full new dataset
+        model.set_train_data(X, Y_targets[task], strict=False)
+        model.train() # Set to train mode for fine-tuning
+        
+        # Fine-tune (this will only train unfrozen params, i.e., likelihood.noise)
+        mll = ExactMarginalLogLikelihood(model.likelihood, model)
+        fit_gpytorch_mll(mll, max_retries=3)
+    
+    success_it += 1  # increment only on success
+
+    print(f"[iter {success_it}/{niter}] DONE: "
+          f"P={float(x_next[0,0]):.2f}, V={float(x_next[0,1]):.2f}, "
+          f"W={w_next:.2f}, D={d_next:.2f}, L={l_next:.2f}")
+
+    # plot every 5 successful iterations
+    if (success_it) % 5 == 0 or success_it == niter:
+        with torch.no_grad():
+            gpw, gpd, gpl = gp_models["Width"], gp_models["Depth"], gp_models["Length"]
+            width_samples  = gpw.posterior(Xgrid).rsample(torch.Size([nmc])).squeeze(-1).cpu().numpy()
+            depth_samples  = gpd.posterior(Xgrid).rsample(torch.Size([nmc])).squeeze(-1).cpu().numpy()
+            length_samples = gpl.posterior(Xgrid).rsample(torch.Size([nmc])).squeeze(-1).cpu().numpy()
+
+        labels_grid_mc = classify_defect_mc(
+            width_samples,
+            depth_samples,
+            e_samples=None,
+            length_samples=length_samples,
+            thickness=thickness
+        )
+        labels_grid_mc = labels_grid_mc.reshape(ngrid, ngrid)
+
+        plot_mc_defect_map(
+            labels_grid_mc,
+            powergrid,
+            velogrid,
+            use_balling=USE_BALLING,
+            alpha_defects=0.7,
+            J=J,
+            iteration=success_it
+        )
+        plt.close('all')  # erase figure to free memory
+
+preds, rmses = evaluate_gp_models(gp_models, X, Y_targets, n_samples=len(X), label="After Active Learning")
+X_probe = torch.tensor([
+    [60, 1200],  # point 1: [power, speed]
+    [80, 2800.0],  # point 2
+    [100, 400]   # point 3
+], dtype=dtype, device=device)
+
+# Evaluate
+probe_preds, _ = evaluate_gp_models(gp_models, X_probe, Y_targets=None, label="Probe Points")

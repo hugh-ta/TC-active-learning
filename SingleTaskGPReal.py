@@ -26,11 +26,7 @@ from scipy.interpolate import griddata
 
 
 # user settings and toggles
-HEAT_SOURCE_NAME = "Double ellipsoidal - 316L - beam d 15um"
-MATERIAL_NAME = "SS316L"
-POWDER_THICKNESS = 10.0  # in micro-meter
-HATCH_DISTANCE = 10.0  # in micro-meter. Only single track experiment but let's use a hatch spacing for the printability map
-AMBIENT_TEMPERATURE = 353  # in K, as given in the paper
+
 USE_BALLING = True
 USE_EDENSITY   = False  
 dtype = torch.double

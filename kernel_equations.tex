@@ -1,0 +1,10 @@
+% Kernel equations (numeric substitution)
+
+$$k_{\mathrm{Matern}}(x,x') = 2 \left(1 + 2.23607 r + \frac{5}{3} r^2\right) e^{-2.23607 r},$$
+$$r = \sqrt{\frac{(x_1 - x_1')^2}{0.543998^2} + \frac{(x_2 - x_2')^2}{0.351651^2}}\,.$$
+$$\mathrm{Cov}[y(x),y(x')] = k_{\mathrm{Matern}}(x,x') + 8.63578\,\delta_{x,x'}. $$
+\
+
+$$k_{\mathrm{DKL}}(x,x') = 0.943435 \left(1 + 2.23607 r_\phi + \frac{5}{3} r_\phi^2\right) e^{-2.23607 r_\phi},$$
+$$r_\phi = \sqrt{\frac{(\phi_1(x)-\phi_1(x'))^2}{0.512462^2} + \frac{(\phi_2(x)-\phi_2(x'))^2}{0.990604^2}}\,.$$
+$$\mathrm{Cov}[y(x),y(x')] = k_{\mathrm{DKL}}(x,x') + 0.0156268\,\delta_{x,x'}. $$
