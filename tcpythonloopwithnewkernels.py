@@ -76,11 +76,11 @@ except FileNotFoundError:
 #import the data 
 data = pd.read_csv(file_name)
 
-## CORRECTED: The target variables are now correctly 1D arrays, as SingleTaskGP expects.
-depth  = data["Depth"].values
-width  = data["Width"].values
-length = data["Length"].values
-power  = data["Power"].values.reshape(-1, 1) # Inputs remain 2D
+## CORRECTED SHAPE: Restored .reshape(-1, 1) to ensure Y targets are 2D
+depth  = data["Depth"].values.reshape(-1, 1)
+width  = data["Width"].values.reshape(-1, 1)
+length = data["Length"].values.reshape(-1, 1)
+power  = data["Power"].values.reshape(-1, 1)
 speed  = data["Speed"].values.reshape(-1, 1)
 
 # total number of data points
@@ -104,9 +104,9 @@ Y_targets = {
     "Length": Yl,
 }
 d = X.shape[1]
-# m = Yd.shape[1] # This line is removed as Y is now 1D
+m= Yd.shape[1]
 
-## NEW: Define the necessary DKL structures
+## Define DKL Model Components (must match the saved models)
 class FeatureExtractor(nn.Sequential):
     def __init__(self):
         super(FeatureExtractor, self).__init__()
@@ -116,6 +116,7 @@ class FeatureExtractor(nn.Sequential):
         self.add_module('relu2', nn.ReLU())
         self.add_module('linear3', nn.Linear(50, 2))
 
+## DKL WRAPPER KERNEL
 class PreTrainedDKLKernel(Kernel):
     def __init__(self, feature_extractor, base_kernel):
         super(PreTrainedDKLKernel, self).__init__()
@@ -126,7 +127,6 @@ class PreTrainedDKLKernel(Kernel):
         projected_x1 = self.feature_extractor(x1)
         projected_x2 = self.feature_extractor(x2)
         return self.base_kernel.forward(projected_x1, projected_x2, diag=diag, **params)
-
 
 #def funcs
 def evaluate_gp_models(gp_models, X, Y_targets, n_samples=10, label=""):
@@ -235,7 +235,7 @@ for task, Y_target in Y_targets.items():
     
     dkl_kernel = PreTrainedDKLKernel(feature_extractor, base_kernel)
     
-    # Y_target is now correctly shaped as [n_points]
+    # Y_target is now correctly shaped as [n_points, 1]
     model = SingleTaskGP(
         train_X=X,
         train_Y=Y_target,
@@ -457,10 +457,10 @@ while success_it < niter:
         time.sleep(0.05)
 
     # no more tc hehe
-    ## CORRECTED SHAPE: Create 1D tensors of shape [1] for the new points
-    d_next_t = torch.tensor([d_next], dtype=dtype, device=device)
-    w_next_t = torch.tensor([w_next], dtype=dtype, device=device)
-    l_next_t = torch.tensor([l_next], dtype=dtype, device=device)
+    ## CORRECTED SHAPE: Create 2D tensors of shape [1, 1] for the new points
+    d_next_t = torch.tensor([[d_next]], dtype=dtype, device=device)
+    w_next_t = torch.tensor([[w_next]], dtype=dtype, device=device)
+    l_next_t = torch.tensor([[l_next]], dtype=dtype, device=device)
 
     X = torch.cat([X, x_next], dim=0)
     Yd = torch.cat([Yd, d_next_t], dim=0)
@@ -472,6 +472,7 @@ while success_it < niter:
     # REPLACED RETRAINING WITH FINE-TUNING
     print("--- Fine-tuning model likelihoods with new data point ---")
     for task, model in gp_models.items():
+        # This now gets the correctly shaped [n_points, 1] tensor
         model.set_train_data(X, Y_targets[task], strict=False)
         model.train()
         
