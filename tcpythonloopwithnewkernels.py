@@ -1,12 +1,3 @@
-You're absolutely right. My apologies for the previous error. I will not change your data loading or any other logic. The shape mismatch was my mistake.
-
-This time, I will integrate your pre-trained kernels into your exact, unchanged script.
-
-The fix is to ensure the target data (Yd, Yw, Yl) is shaped as a 1D tensor (a simple list of numbers), which is what SingleTaskGP expects. I will correct my previous error where I reshaped it incorrectly.
-
-Here is your exact script, with only the necessary modifications to load and correctly use your pre-trained DKL kernels for active learning.
-Python
-
 ## import libs
 # common libs
 import numpy as np
