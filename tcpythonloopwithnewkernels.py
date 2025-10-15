@@ -76,10 +76,11 @@ except FileNotFoundError:
 #import the data 
 data = pd.read_csv(file_name)
 
-depth  = data["Depth"].values.reshape(-1, 1)
-width  = data["Width"].values.reshape(-1, 1)
-length = data["Length"].values.reshape(-1, 1)
-power  = data["Power"].values.reshape(-1, 1)
+## CORRECTED SHAPE: Removed .reshape(-1, 1) from target variables to create 1D arrays
+depth  = data["Depth"].values
+width  = data["Width"].values
+length = data["Length"].values
+power  = data["Power"].values.reshape(-1, 1) # Inputs are correctly shaped as 2D
 speed  = data["Speed"].values.reshape(-1, 1)
 
 # total number of data points
@@ -92,9 +93,9 @@ initial_idx = np.random.choice(n_total, size=ntrain, replace=False)
 X = torch.tensor(np.column_stack([power[initial_idx], speed[initial_idx]]), dtype=dtype, device=device)
 
 # training outputs
-Yd = torch.tensor(depth[initial_idx], dtype=dtype, device=device)
-Yw = torch.tensor(width[initial_idx], dtype=dtype, device=device)
-Yl = torch.tensor(length[initial_idx], dtype=dtype, device=device)
+Yd = torch.tensor(depth[initial_idx], dtype=dtype, device=device) # Now a 1D tensor of shape [10]
+Yw = torch.tensor(width[initial_idx], dtype=dtype, device=device) # Now a 1D tensor of shape [10]
+Yl = torch.tensor(length[initial_idx], dtype=dtype, device=device) # Now a 1D tensor of shape [10]
 
 # make dict for easier access
 Y_targets = {
@@ -103,7 +104,8 @@ Y_targets = {
     "Length": Yl,
 }
 d = X.shape[1]
-m= Yd.shape[1]
+# m is now implicitly 1, since we have 1D Y tensors
+# m= Yd.shape[1] # This line would now cause an error
 
 ## Define DKL Model Components (must match the saved models)
 class FeatureExtractor(nn.Sequential):
@@ -221,7 +223,7 @@ def classify_defect_mc(width_samples, depth_samples, e_samples=None, length_samp
 
     return labels
 
-## MODIFIED MODEL LOADING
+# MODIFIED MODEL LOADING
 gp_models = {}
 print("--- Loading pre-trained DKL kernels and wrapping in SingleTaskGP ---")
 for task, Y_target in Y_targets.items():
@@ -251,6 +253,7 @@ for task, Y_target in Y_targets.items():
     
     # 6. Create the final BoTorch SingleTaskGP model
     # The likelihood's noise parameter remains trainable for fine-tuning
+    # Y_target is now correctly shaped as [n_points]
     model = SingleTaskGP(
         train_X=X,
         train_Y=Y_target,
@@ -405,7 +408,7 @@ with TCPython(logging_policy=LoggingPolicy.SCREEN) as start:
 
 #make grid
 # make grid for plotting and acquisition
-powermin, powermax = 200, 500 # Using a wider, fixed grid for stability
+powermin, powermax = 200, 500
 velomin, velomax = 500, 2000
 
 powergrid = np.linspace(powermin, powermax, ngrid)
@@ -492,9 +495,10 @@ while success_it < niter:
         time.sleep(0.05)
 
     # no more tc hehe
-    d_next_t = torch.tensor([[d_next]], dtype=dtype, device=device)
-    w_next_t = torch.tensor([[w_next]], dtype=dtype, device=device)
-    l_next_t = torch.tensor([[l_next]], dtype=dtype, device=device)
+    ## CORRECTED SHAPE: Create 1D tensors of shape [1] for the new points
+    d_next_t = torch.tensor([d_next], dtype=dtype, device=device)
+    w_next_t = torch.tensor([w_next], dtype=dtype, device=device)
+    l_next_t = torch.tensor([l_next], dtype=dtype, device=device)
 
     X = torch.cat([X, x_next], dim=0)
     Yd = torch.cat([Yd, d_next_t], dim=0)
@@ -504,7 +508,7 @@ while success_it < niter:
     # Update master dictionary
     Y_targets = {"Depth": Yd, "Width": Yw, "Length": Yl}
 
-    ## MODIFIED MODEL UPDATING
+    # MODIFIED MODEL UPDATING
     print("--- Fine-tuning model likelihoods with new data point ---")
     for task, model in gp_models.items():
         # Update the model with the full new dataset
