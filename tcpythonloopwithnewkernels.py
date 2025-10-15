@@ -10,8 +10,9 @@ import tqdm
 from matplotlib import colors
 import gc, time
 
+
 # GPyTorch
-from gpytorch.kernels import MaternKernel, ScaleKernel
+from gpytorch.kernels import MaternKernel, ScaleKernel, Kernel
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from gpytorch.models import ExactGP
 from gpytorch.likelihoods import GaussianLikelihood
@@ -104,7 +105,7 @@ Y_targets = {
 d = X.shape[1]
 m= Yd.shape[1]
 
-## Define DKL Model Structure (must match the saved models)
+## Define DKL Model Components (must match the saved models)
 class FeatureExtractor(nn.Sequential):
     def __init__(self):
         super(FeatureExtractor, self).__init__()
@@ -114,18 +115,22 @@ class FeatureExtractor(nn.Sequential):
         self.add_module('relu2', nn.ReLU())
         self.add_module('linear3', nn.Linear(50, 2))
 
-class DeepGPModel(ExactGP):
-    def __init__(self, train_x, train_y, likelihood, feature_extractor):
-        super(DeepGPModel, self).__init__(train_x, train_y, likelihood)
+## NEW DKL WRAPPER KERNEL
+# This custom Kernel wraps the feature extractor and a base kernel.
+# This is the object we will pass to SingleTaskGP.
+class PreTrainedDKLKernel(Kernel):
+    def __init__(self, feature_extractor, base_kernel):
+        super(PreTrainedDKLKernel, self).__init__()
         self.feature_extractor = feature_extractor
-        self.mean_module = ConstantMean()
-        self.covar_module = ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=2))
-    def forward(self, x):
-        projected_x = self.feature_extractor(x)
-        mean_x = self.mean_module(projected_x)
-        covar_x = self.covar_module(projected_x)
-        return MultivariateNormal(mean_x, covar_x)
+        self.base_kernel = base_kernel
 
+    def forward(self, x1, x2, diag=False, **params):
+        # Pass inputs through the neural network
+        projected_x1 = self.feature_extractor(x1)
+        projected_x2 = self.feature_extractor(x2)
+        
+        # Compute covariance in the feature space using the base kernel
+        return self.base_kernel.forward(projected_x1, projected_x2, diag=diag, **params)
 
 #def funcs
 def evaluate_gp_models(gp_models, X, Y_targets, n_samples=10, label=""):
@@ -142,7 +147,6 @@ def evaluate_gp_models(gp_models, X, Y_targets, n_samples=10, label=""):
                 rmses[task] = np.sqrt(np.mean((y_pred - y_true) ** 2))
             preds[task] = y_pred
 
-
     print(f"\n=== Evaluation {label} ===")
     if rmses:
         print("RMSE per task:")
@@ -158,7 +162,6 @@ def evaluate_gp_models(gp_models, X, Y_targets, n_samples=10, label=""):
         else:
             pred_vals = [f"{preds[t][i]:.2f}" for t in ["Depth", "Width", "Length"]]
             print(f"  Probe Point {i+1} Pred: {pred_vals}")
-
 
     return preds, rmses
 def classify_defect(width, depth, e, length=None, thickness=10, ed_low=edensity_low, ed_high=edensity_high):
@@ -218,34 +221,45 @@ def classify_defect_mc(width_samples, depth_samples, e_samples=None, length_samp
 
     return labels
 
-## Load Pre-Trained DKL Models
+## MODIFIED MODEL LOADING
 gp_models = {}
-print("--- Loading pre-trained DKL kernels ---")
+print("--- Loading pre-trained DKL kernels and wrapping in SingleTaskGP ---")
 for task, Y_target in Y_targets.items():
-    # Instantiate a fresh model structure
+    # 1. Instantiate the components of the DKL model
     feature_extractor = FeatureExtractor()
+    base_kernel = ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=2))
     likelihood = GaussianLikelihood()
-    model = DeepGPModel(X, Y_target, likelihood, feature_extractor)
-
-    # Construct filename and load the saved state dictionary
+    
+    # 2. Load the full state dict from the .pth file
     model_path = f"dkl_kernel_for_{task}.pth"
     print(f"  Loading model for '{task}' from '{model_path}'...")
-    state_dict = torch.load(model_path)
-    model.load_state_dict(state_dict)
+    full_state_dict = torch.load(model_path)
 
-    # Freeze the feature extractor and kernel to preserve the learned mapping
-    for param in model.feature_extractor.parameters():
+    # 3. Carefully load the parameters into each component by stripping prefixes
+    feature_extractor.load_state_dict({k.replace('feature_extractor.', ''): v for k, v in full_state_dict.items() if 'feature_extractor' in k})
+    base_kernel.load_state_dict({k.replace('covar_module.', ''): v for k, v in full_state_dict.items() if 'covar_module' in k})
+    likelihood.load_state_dict({k.replace('likelihood.', ''): v for k, v in full_state_dict.items() if 'likelihood' in k})
+    
+    # 4. Freeze the feature extractor and base kernel to preserve the learned mapping
+    for param in feature_extractor.parameters():
         param.requires_grad = False
-    for param in model.covar_module.parameters():
+    for param in base_kernel.parameters():
         param.requires_grad = False
     
-    # IMPORTANT: The likelihood's noise is left trainable for fine-tuning
-    model.likelihood.train()
+    # 5. Create the custom DKL wrapper kernel
+    dkl_kernel = PreTrainedDKLKernel(feature_extractor, base_kernel)
     
+    # 6. Create the final BoTorch SingleTaskGP model
+    # The likelihood's noise parameter remains trainable for fine-tuning
+    model = SingleTaskGP(
+        train_X=X,
+        train_Y=Y_target,
+        covar_module=dkl_kernel,
+        likelihood=likelihood
+    )
     gp_models[task] = model
 
 print("--- Pre-trained models loaded and core parameters frozen. ---")
-
 
 evaluate_gp_models(gp_models, X, Y_targets, n_samples=10, label="After loading pre-trained models")
 
@@ -391,8 +405,8 @@ with TCPython(logging_policy=LoggingPolicy.SCREEN) as start:
 
 #make grid
 # make grid for plotting and acquisition
-powermin, powermax = X[:, 0].min().item(), X[:, 0].max().item()
-velomin, velomax = X[:, 1].min().item(), X[:, 1].max().item()
+powermin, powermax = 200, 500 # Using a wider, fixed grid for stability
+velomin, velomax = 500, 2000
 
 powergrid = np.linspace(powermin, powermax, ngrid)
 velogrid = np.linspace(velomin, velomax, ngrid)
@@ -415,7 +429,7 @@ while success_it < niter:
         mp = MaterialProperties.from_library(MATERIAL_NAME)
 
         # Pick next x with top-3 fallback
-        gps = [gp_models["Width"], gp_models["Depth"], gp_models["Length"]]
+        # The gps dictionary now contains the correct BoTorch models
         J, top_candidates = entropy_sigma_improved(
             Xgrid,
             gps=[gp_models["Width"], gp_models["Length"], gp_models["Depth"]],
@@ -490,7 +504,7 @@ while success_it < niter:
     # Update master dictionary
     Y_targets = {"Depth": Yd, "Width": Yw, "Length": Yl}
 
-    ## Update models and fine-tune likelihood
+    ## MODIFIED MODEL UPDATING
     print("--- Fine-tuning model likelihoods with new data point ---")
     for task, model in gp_models.items():
         # Update the model with the full new dataset
@@ -537,9 +551,9 @@ while success_it < niter:
 
 preds, rmses = evaluate_gp_models(gp_models, X, Y_targets, n_samples=len(X), label="After Active Learning")
 X_probe = torch.tensor([
-    [60, 1200],  # point 1: [power, speed]
-    [80, 2800.0],  # point 2
-    [100, 400]   # point 3
+    [300, 1200],  # point 1: [power, speed]
+    [400, 800],  # point 2
+    [250, 1800]   # point 3
 ], dtype=dtype, device=device)
 
 # Evaluate
