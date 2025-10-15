@@ -513,13 +513,6 @@ def plot_active_learning_history_fixed(
             meand_i, stdd_i = meand[i].item(), stdd[i].item()
             meand_i = max(meand_i, 1e-6)
 
-            p1[i] = norm.cdf((c1 - meanw_i / meand_i) /
-                              np.sqrt((stdw_i / meand_i)**2 + (meanw_i * stdd_i / meand_i**2)**2))
-            p2[i] = norm.cdf((c2 - meand_i / thickness) / (stdd_i / thickness))
-            p3[i] = norm.cdf((c3 - meanl_i / meanw_i) /
-                              np.sqrt((stdl_i / meanw_i)**2 + (meanl_i * stdw_i / meanw_i**2)**2))
-            p4[i] = 1 - (p1[i] + p2[i] + p3[i])
-
         probs = torch.stack([p4, p1, p2, p3], dim=-1)
         category = torch.argmax(probs, dim=-1).numpy()
 

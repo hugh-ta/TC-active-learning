@@ -46,7 +46,7 @@ dtype = torch.double
 device = torch.device("cpu")
 thickness = 10
 ntrain = 10
-niter = 20 #how many AL loops after  training are allowed
+niter = 10 #how many AL loops after  training are allowed
 restarts = 10
 ngrid= 100
 nmc = 64
@@ -59,6 +59,7 @@ torch.manual_seed(SEED)
 keyholing = 1.9
 lof = 1.5
 balling = 4.35
+plotiter = 2  # plot every 'plotiter' iterations
 
 constraints = [keyholing, lof, balling]
 
@@ -348,7 +349,7 @@ def entropy_sigma_improved(X, gps, constraints, thickness, Xtrain=None, mode="MC
     top_indices = np.argsort(-J)[:top_k]
     return J, top_indices
 
-def plot_mc_defect_map(labels_grid, powergrid, velogrid, use_balling=USE_BALLING, alpha_defects=0.7, J=None, iteration=None):
+def plot_mc_defect_map(labels_grid, powergrid, velogrid, use_balling=USE_BALLING, alpha_defects=0.7, J=None, iteration=None, Xtrain=None, newest_point=None):
 
     if J is not None:
         fig, axes = plt.subplots(1, 2, figsize=(14, 6))
@@ -378,6 +379,90 @@ def plot_mc_defect_map(labels_grid, powergrid, velogrid, use_balling=USE_BALLING
     if iteration is not None:
         title_defect += f" - Iter {iteration}"
     ax_defect.set_title(title_defect)
+
+    # If training points provided, plot them: previous points as black dots, newest point as a star
+    if Xtrain is not None:
+        try:
+            # Convert to numpy float array safely (supports torch tensors)
+            if hasattr(Xtrain, 'detach'):
+                Xtrain_np = Xtrain.detach().cpu().numpy().astype(float)
+            elif hasattr(Xtrain, 'cpu'):
+                Xtrain_np = Xtrain.cpu().numpy().astype(float)
+            else:
+                Xtrain_np = np.asarray(Xtrain, dtype=float)
+        except Exception:
+            Xtrain_np = np.asarray(Xtrain)
+
+        # Normalize shape to (n,2)
+        if Xtrain_np.ndim == 1 and Xtrain_np.size == 2:
+            Xtrain_np = Xtrain_np.reshape(1, 2)
+        elif Xtrain_np.ndim > 2:
+            Xtrain_np = Xtrain_np.reshape(Xtrain_np.shape[0], -1)
+            if Xtrain_np.shape[1] >= 2:
+                Xtrain_np = Xtrain_np[:, :2]
+            else:
+                Xtrain_np = np.empty((0, 2))
+
+        # If a scaler is available (we scaled inputs before modeling), inverse-transform
+        try:
+            if 'scaler' in globals() and Xtrain_np.size != 0:
+                Xtrain_np = scaler.inverse_transform(Xtrain_np)
+        except Exception:
+            # If inverse transform fails, continue with original values
+            pass
+
+        if Xtrain_np.size != 0 and Xtrain_np.shape[1] >= 2:
+            # Diagnostic prints: show ranges and sample values before plotting
+            try:
+                print(f"[plot dbg] Xtrain_np.shape={Xtrain_np.shape}")
+                if Xtrain_np.size != 0:
+                    print(f"[plot dbg] col0(min,max)={Xtrain_np[:,0].min():.3f},{Xtrain_np[:,0].max():.3f} | col1(min,max)={Xtrain_np[:,1].min():.3f},{Xtrain_np[:,1].max():.3f}")
+                    print(f"[plot dbg] sample rows:\n{Xtrain_np[:5]}")
+            except Exception as e:
+                print(f"[plot dbg] failed diagnostics: {e}")
+
+            # Plot previous points (all but last) as black dots
+            if Xtrain_np.shape[0] > 1:
+                prev = Xtrain_np[:-1]
+                ax_defect.scatter(prev[:, 1], prev[:, 0], color='k', s=30, marker='o', zorder=5, label='Previous')
+            # Plot newest point as a star
+            newest_np = Xtrain_np[-1]
+            try:
+                print(f"[plot dbg] newest (power,vel) = ({newest_np[0]:.3f}, {newest_np[1]:.3f})")
+            except Exception:
+                pass
+            ax_defect.scatter(newest_np[1], newest_np[0], color='red', s=120, marker='*', edgecolor='k', zorder=6, label='Newest')
+    else:
+        # If newest_point provided separately, plot it
+        if newest_point is not None:
+            try:
+                if hasattr(newest_point, 'detach'):
+                    new_np = newest_point.detach().cpu().numpy().astype(float).reshape(-1)
+                elif hasattr(newest_point, 'cpu'):
+                    new_np = newest_point.cpu().numpy().reshape(-1)
+                else:
+                    new_np = np.asarray(newest_point, dtype=float).reshape(-1)
+                if new_np.size >= 2:
+                    try:
+                        print(f"[plot dbg] newest_point (power,vel) = ({new_np[0]:.3f}, {new_np[1]:.3f})")
+                    except Exception:
+                        pass
+                    ax_defect.scatter(new_np[1], new_np[0], color='red', s=120, marker='*', edgecolor='k', zorder=6, label='Newest')
+            except Exception:
+                pass
+
+    # Add legend entries for plotted training points if present
+    handles, labels = ax_defect.get_legend_handles_labels()
+    # ensure defect legend remains by adding custom legend elements
+    custom = [Patch(facecolor="#E07B7B", label="Keyhole W/D < 1.5"),
+              Patch(facecolor="#7bbfc8", label="Lack of Fusion D/t <1.9")]
+    if use_balling:
+        custom.append(Patch(facecolor="#289C8E", label="Balling W/L < 0.23"))
+    custom.append(Patch(facecolor="#FFFFFF", edgecolor="black", label="Stable/Printable"))
+    # extend with training handles if they exist
+    if handles:
+        custom.extend(handles)
+    ax_defect.legend(handles=custom, loc='best')
 
     legend_elements = [
         Patch(facecolor="#E07B7B", label="Keyhole W/D < 1.5"),
@@ -537,7 +622,7 @@ while success_it < niter:
           f"P={float(scaler.inverse_transform(x_next.cpu().numpy())[0,0]):.2f}, V={float(scaler.inverse_transform(x_next.cpu().numpy())[0,1]):.2f}, "
           f"W={w_next:.2f}, D={d_next:.2f}, L={l_next:.2f}")
 
-    if (success_it) % 5 == 0 or success_it == niter:
+    if (success_it) % plotiter == 0 or success_it == niter:
         with torch.no_grad():
             gpw, gpd, gpl = gp_models["Width"], gp_models["Depth"], gp_models["Length"]
             width_samples  = gpw.posterior(Xgrid).rsample(torch.Size([nmc])).squeeze(-1).cpu().numpy()
@@ -560,7 +645,9 @@ while success_it < niter:
             use_balling=USE_BALLING,
             alpha_defects=0.7,
             J=J,
-            iteration=success_it
+            iteration=success_it,
+            Xtrain=X,
+            newest_point=x_next
         )
         plt.close('all')
 
