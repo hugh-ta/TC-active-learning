@@ -76,7 +76,6 @@ except FileNotFoundError:
 #import the data 
 data = pd.read_csv(file_name)
 
-# REVERTED TO YOUR ORIGINAL, CORRECT SHAPES
 depth  = data["Depth"].values.reshape(-1, 1)
 width  = data["Width"].values.reshape(-1, 1)
 length = data["Length"].values.reshape(-1, 1)
@@ -106,7 +105,7 @@ Y_targets = {
 d = X.shape[1]
 m= Yd.shape[1]
 
-# NEW: Define the necessary DKL structures
+## NEW: Define the necessary DKL structures
 class FeatureExtractor(nn.Sequential):
     def __init__(self):
         super(FeatureExtractor, self).__init__()
@@ -127,8 +126,49 @@ class PreTrainedDKLKernel(Kernel):
         projected_x2 = self.feature_extractor(x2)
         return self.base_kernel.forward(projected_x1, projected_x2, diag=diag, **params)
 
-
 #def funcs
+## MODIFIED: This function now builds the DKL model, but exactly mimics your original FitGP
+def FitDKL_GP(X, Y, task):
+    # 1. Instantiate the components of the DKL model
+    feature_extractor = FeatureExtractor()
+    base_kernel = ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=2))
+    likelihood = GaussianLikelihood()
+    
+    # 2. Load the full state dict from the correct .pth file
+    model_path = f"dkl_kernel_for_{task}.pth"
+    full_state_dict = torch.load(model_path)
+
+    # 3. Load the parameters into each component
+    feature_extractor.load_state_dict({k.replace('feature_extractor.', ''): v for k, v in full_state_dict.items() if 'feature_extractor' in k})
+    base_kernel.load_state_dict({k.replace('covar_module.', ''): v for k, v in full_state_dict.items() if 'covar_module' in k})
+    likelihood.load_state_dict({k.replace('likelihood.', ''): v for k, v in full_state_dict.items() if 'likelihood' in k})
+    
+    # 4. Freeze parameters
+    for param in feature_extractor.parameters():
+        param.requires_grad = False
+    for param in base_kernel.parameters():
+        param.requires_grad = False
+        
+    # 5. Create the custom DKL wrapper kernel
+    dkl_kernel = PreTrainedDKLKernel(feature_extractor, base_kernel)
+
+    # 6. Create the SingleTaskGP exactly like your original FitGP
+    model = SingleTaskGP(
+        train_X=X,
+        train_Y=Y,
+        covar_module=dkl_kernel,
+        likelihood=likelihood,
+        input_transform=Normalize(X.shape[1]),
+        outcome_transform=Standardize(1),
+    )
+    return model
+
+def fitGP(model, restarts=restarts):
+    mll = ExactMarginalLogLikelihood(model.likelihood, model)
+    # This will now only fine-tune the noise, as other params are frozen
+    fit_gpytorch_mll(mll, optimizer_cls=None, options={"maxiter": 200}, num_restarts=restarts)
+    return model
+
 def evaluate_gp_models(gp_models, X, Y_targets, n_samples=10, label=""):
     preds, rmses = {}, {}
 
@@ -137,16 +177,14 @@ def evaluate_gp_models(gp_models, X, Y_targets, n_samples=10, label=""):
         with torch.no_grad():
             posterior = gp.posterior(X)
             y_pred = posterior.mean.cpu().numpy().ravel()
-            if Y_targets is not None:
-                y_true = Y_targets[task].cpu().numpy().ravel()
-                rmses[task] = np.sqrt(np.mean((y_pred - y_true) ** 2))
+            y_true = Y_targets[task].cpu().numpy().ravel()
             preds[task] = y_pred
+            rmses[task] = np.sqrt(np.mean((y_pred - y_true) ** 2))
 
     print(f"\n=== Evaluation {label} ===")
-    if rmses:
-        print("RMSE per task:")
-        for t, r in rmses.items():
-            print(f"  {t}: {r:.3f}")
+    print("RMSE per task:")
+    for t, r in rmses.items():
+        print(f"  {t}: {r:.3f}")
 
     print("\nSample predictions:")
     for i in range(min(n_samples, len(X))):
@@ -157,6 +195,7 @@ def evaluate_gp_models(gp_models, X, Y_targets, n_samples=10, label=""):
         else:
             pred_vals = [f"{preds[t][i]:.2f}" for t in ["Depth", "Width", "Length"]]
             print(f"  Probe Point {i+1} Pred: {pred_vals}")
+
     return preds, rmses
 def classify_defect(width, depth, e, length=None, thickness=10, ed_low=edensity_low, ed_high=edensity_high):
     jitter = 1e-9
@@ -210,47 +249,17 @@ def classify_defect_mc(width_samples, depth_samples, e_samples=None, length_samp
             else:
                 mc_labels.append(classify_defect(w_s[j], d_s[j], None, l, thickness))
         labels[i] = max(set(mc_labels), key=mc_labels.count)
+
     return labels
 
-# fit initial GP models -- REPLACED WITH DKL LOADING
+# fit initial GP models
 gp_models = {}
-print("--- Loading pre-trained DKL kernels and wrapping in SingleTaskGP ---")
-for task, Y_target in Y_targets.items():
-    feature_extractor = FeatureExtractor()
-    base_kernel = ScaleKernel(MaternKernel(nu=2.5, ard_num_dims=2))
-    likelihood = GaussianLikelihood()
-    
-    model_path = f"dkl_kernel_for_{task}.pth"
-    print(f"  Loading model for '{task}' from '{model_path}'...")
-    full_state_dict = torch.load(model_path)
+for task, Y in Y_targets.items():
+    gp = FitDKL_GP(X, Y, task) # Use the new DKL model fitting function
+    gp = fitGP(gp, restarts=restarts)
+    gp_models[task] = gp
 
-    feature_extractor.load_state_dict({k.replace('feature_extractor.', ''): v for k, v in full_state_dict.items() if 'feature_extractor' in k})
-    base_kernel.load_state_dict({k.replace('covar_module.', ''): v for k, v in full_state_dict.items() if 'covar_module' in k})
-    likelihood.load_state_dict({k.replace('likelihood.', ''): v for k, v in full_state_dict.items() if 'likelihood' in k})
-    
-    for param in feature_extractor.parameters():
-        param.requires_grad = False
-    for param in base_kernel.parameters():
-        param.requires_grad = False
-    
-    dkl_kernel = PreTrainedDKLKernel(feature_extractor, base_kernel)
-    
-    # CORRECTED MODEL DEFINITION
-    # Removed the `outcome_transform` because the DKL kernel was trained on raw data.
-    # This prevents internal conflicts and uses the kernel as intended.
-    model = SingleTaskGP(
-        train_X=X,
-        train_Y=Y_target, # Y_target is correctly shaped [n_points, 1]
-        covar_module=dkl_kernel,
-        likelihood=likelihood
-    )
-    gp_models[task] = model
-
-print("--- Pre-trained models loaded and core parameters frozen. ---")
-
-
-evaluate_gp_models(gp_models, X, Y_targets, n_samples=10, label="After loading pre-trained kernels")
-
+evaluate_gp_models(gp_models, X, Y_targets, n_samples=10, label="After initial DKL training")
 
 #def acquisiton func and helpers
 
@@ -458,7 +467,6 @@ while success_it < niter:
         time.sleep(0.05)
 
     # no more tc hehe
-    # CORRECTED SHAPE: Create 2D tensors of shape [1, 1] for the new points
     d_next_t = torch.tensor([[d_next]], dtype=dtype, device=device)
     w_next_t = torch.tensor([[w_next]], dtype=dtype, device=device)
     l_next_t = torch.tensor([[l_next]], dtype=dtype, device=device)
@@ -470,15 +478,11 @@ while success_it < niter:
     
     Y_targets = {"Depth": Yd, "Width": Yw, "Length": Yl}
 
-    # REPLACED RETRAINING WITH FINE-TUNING
-    print("--- Fine-tuning model likelihoods with new data point ---")
-    for task, model in gp_models.items():
-        # This now gets the correctly shaped [n_points, 1] tensor
-        model.set_train_data(X, Y_targets[task], strict=False)
-        model.train()
-        
-        mll = ExactMarginalLogLikelihood(model.likelihood, model)
-        fit_gpytorch_mll(mll, max_retries=3)
+    # retrain models
+    for task, Y in zip(["Depth", "Width", "Length"], [Yd, Yw, Yl]):
+        gp = FitDKL_GP(X, Y, task) # Re-instantiate the DKL model from scratch with new data
+        gp = fitGP(gp, restarts=restarts)
+        gp_models[task] = gp
     
     success_it += 1
 
