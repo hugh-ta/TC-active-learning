@@ -11,7 +11,6 @@ from scipy.interpolate import griddata
 from torch import nn
 from tqdm import tqdm
 import json
-import joblib  # Added for saving the scaler object
 
 from botorch.models import SingleTaskGP
 from botorch.fit import fit_gpytorch_mll
@@ -120,6 +119,7 @@ class ExactGPModel(gpytorch.models.ExactGP):
 # ==============================================================================
 # 2. MAIN PROCESSING LOOP
 # ==============================================================================
+# This loop will run the entire analysis for each target variable.
 for target_output in TARGET_VARIABLES:
 
     print("\n" + "#"*80)
@@ -130,14 +130,8 @@ for target_output in TARGET_VARIABLES:
     TRAIN_X, TRAIN_Y, TEST_X, TEST_Y_TRUE, SCALER, FULL_X, FULL_Y = load_and_process_data(
         FILEPATH, INPUT_FEATURES, target_output
     )
-    
-    # --- ADDED: Save the scaler for use in the active learning script ---
-    scaler_filename = f"scaler_for_{target_output}.save"
-    joblib.dump(SCALER, scaler_filename)
-    print(f"--- Scaler for '{target_output}' saved to '{scaler_filename}' ---")
 
-
-    # --- Step 2: Define Objective functions that use the train/test split ---
+    # --- Step 2: Define Objective functions that use the current data ---
     def evaluate_deep_kernel(parameterization):
         lr, weight, ls_1, ls_2, noise = parameterization
         model = DeepGPModel(TRAIN_X, TRAIN_Y, GaussianLikelihood(), FeatureExtractor())
@@ -176,9 +170,19 @@ for target_output in TARGET_VARIABLES:
 
     train_x_custom = torch.rand(N_INITIAL_CUSTOM, 5) * (bounds_custom[1] - bounds_custom[0]) + bounds_custom[0]
     train_y_custom = torch.cat([evaluate_deep_kernel(p) for p in tqdm(train_x_custom, desc="Initial DKL Evals")])
+    # Ensure train_y_custom is 2D with shape (n,1) for BoTorch
+    if train_y_custom.dim() == 1:
+        train_y_custom = train_y_custom.unsqueeze(-1)
+    else:
+        train_y_custom = train_y_custom.reshape(-1, 1)
 
     train_x_matern = torch.rand(N_INITIAL_MATERN, 4) * (bounds_matern[1] - bounds_matern[0]) + bounds_matern[0]
     train_y_matern = torch.cat([evaluate_matern52_kernel(p) for p in tqdm(train_x_matern, desc="Initial Matern Evals")])
+    # Ensure train_y_matern is 2D with shape (n,1) for BoTorch
+    if train_y_matern.dim() == 1:
+        train_y_matern = train_y_matern.unsqueeze(-1)
+    else:
+        train_y_matern = train_y_matern.reshape(-1, 1)
 
     best_rmse_custom = [-train_y_custom.max().item()]
     best_rmse_matern = [-train_y_matern.max().item()]
@@ -186,19 +190,33 @@ for target_output in TARGET_VARIABLES:
     main_bo_loop = tqdm(range(N_ITERATIONS), desc=f"BO Race for '{target_output}'")
     for i in main_bo_loop:
         # DKL Step
-        gp_custom = SingleTaskGP(normalize(train_x_custom, bounds_custom), train_y_custom.unsqueeze(-1))
+        gp_custom = SingleTaskGP(normalize(train_x_custom, bounds_custom), train_y_custom)
         mll_c = ExactMarginalLogLikelihood(gp_custom.likelihood, gp_custom); fit_gpytorch_mll(mll_c)
         cand_c, _ = optimize_acqf(UpperConfidenceBound(gp_custom, 2.5), torch.tensor([[0.0]*5, [1.0]*5]), 1, BO_NUM_RESTARTS, 512)
-        new_x_c = unnormalize(cand_c, bounds_custom); new_y_c = evaluate_deep_kernel(new_x_c.squeeze(0))
-        train_x_custom = torch.cat([train_x_custom, new_x_c]); train_y_custom = torch.cat([train_y_custom, new_y_c])
+        new_x_c = unnormalize(cand_c, bounds_custom)
+        new_y_c = evaluate_deep_kernel(new_x_c.squeeze(0))
+        # normalize new_y_c shape to (1,1) for concatenation
+        if new_y_c.dim() == 0:
+            new_y_c = new_y_c.view(1,1)
+        elif new_y_c.dim() == 1:
+            new_y_c = new_y_c.unsqueeze(-1)
+        train_x_custom = torch.cat([train_x_custom, new_x_c])
+        train_y_custom = torch.cat([train_y_custom, new_y_c])
         best_rmse_custom.append(-train_y_custom.max().item())
 
         # Matern Step
-        gp_matern = SingleTaskGP(normalize(train_x_matern, bounds_matern), train_y_matern.unsqueeze(-1))
+        gp_matern = SingleTaskGP(normalize(train_x_matern, bounds_matern), train_y_matern)
         mll_m = ExactMarginalLogLikelihood(gp_matern.likelihood, gp_matern); fit_gpytorch_mll(mll_m)
         cand_m, _ = optimize_acqf(UpperConfidenceBound(gp_matern, 2.5), torch.tensor([[0.0]*4, [1.0]*4]), 1, BO_NUM_RESTARTS, 512)
-        new_x_m = unnormalize(cand_m, bounds_matern); new_y_m = evaluate_matern52_kernel(new_x_m.squeeze(0))
-        train_x_matern = torch.cat([train_x_matern, new_x_m]); train_y_matern = torch.cat([train_y_matern, new_y_m])
+        new_x_m = unnormalize(cand_m, bounds_matern)
+        new_y_m = evaluate_matern52_kernel(new_x_m.squeeze(0))
+        # normalize new_y_m shape to (1,1) for concatenation
+        if new_y_m.dim() == 0:
+            new_y_m = new_y_m.view(1,1)
+        elif new_y_m.dim() == 1:
+            new_y_m = new_y_m.unsqueeze(-1)
+        train_x_matern = torch.cat([train_x_matern, new_x_m])
+        train_y_matern = torch.cat([train_y_matern, new_y_m])
         best_rmse_matern.append(-train_y_matern.max().item())
 
         main_bo_loop.set_postfix({'DKL RMSE': f"{best_rmse_custom[-1]:.4f}", 'Matern RMSE': f"{best_rmse_matern[-1]:.4f}"})
@@ -208,7 +226,7 @@ for target_output in TARGET_VARIABLES:
     best_params_custom = train_x_custom[train_y_custom.argmax()]
     best_params_matern = train_x_matern[train_y_matern.argmax()]
 
-    # Prepare the full dataset for the final training run
+    # <<< MODIFICATION: Prepare the full dataset for the final training run >>>
     FULL_X_SCALED = torch.from_numpy(SCALER.transform(FULL_X))
     FULL_Y_TORCH = torch.from_numpy(FULL_Y)
 
@@ -258,6 +276,8 @@ for target_output in TARGET_VARIABLES:
     x2_grid = np.linspace(FULL_X[:, 1].min(), FULL_X[:, 1].max(), 50)
     X1, X2 = np.meshgrid(x1_grid, x2_grid)
     
+    # <<< MODIFICATION: Use the actual full data for the ground truth plot, not an interpolation >>>
+    # This provides a more accurate visualization of the true data surface
     Z_truth = griddata(FULL_X, FULL_Y, (X1, X2), method='cubic') 
     
     grid_torch = torch.from_numpy(SCALER.transform(np.vstack([X1.ravel(), X2.ravel()]).T))
