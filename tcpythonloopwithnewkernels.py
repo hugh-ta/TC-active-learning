@@ -224,7 +224,6 @@ def evaluate_gp_models(gp_models, X, Y_targets, n_samples=10, label=""):
 
     return preds, rmses
 
-# ... (The rest of your script is unchanged) ...
 
 def classify_defect(width, depth, e, length=None, thickness=10, ed_low=edensity_low, ed_high=edensity_high):
     jitter = 1e-9
