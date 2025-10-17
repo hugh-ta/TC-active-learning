@@ -25,7 +25,7 @@ from scipy.stats import norm
 
 
 #tcpython
-from tcpython import *
+from tc_python import *
 
 # user settings and toggles
 HEAT_SOURCE_NAME = "Double ellipsoidal - 316L - beam d 15um"
@@ -361,7 +361,7 @@ while success_it < niter:
         gp_models=gp_models,
         X_train=X,
         top_k=5,
-        alpha_dist=0.1
+        alphadist=0.1
     )
 
     # try top 3 candidates in case of simulation failure
