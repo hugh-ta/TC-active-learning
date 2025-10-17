@@ -98,8 +98,18 @@ for i in range(n_total):
     else:
         defects[i] = classify_defect(width[i], depth[i], None, length[i])
 # pick ntrain indices randomly from the actual data
-initial_idx = np.random.choice(n_total, size=ntrain, replace=False)
-
+initial_idx = np.array([
+    1,   # Lack of Fusion (Low Power, Mid Speed)
+    8,   # Lack of Fusion (Low Power, High Speed)
+    60,  # Keyhole (Mid-Low Power, Mid Speed)
+    90,  # Keyhole (Mid Power, Mid Speed)
+    120, # On the Keyhole/Good Boundary
+    150, # Keyhole (Mid-High Power, Mid Speed)
+    180, # Keyhole (High Power, Low Speed)
+    210, # On the Keyhole/Good Boundary
+    0,   # Good (Low Power, Low Speed)
+    214, # Good (High Power, High Speed)
+])
 # training inputs
 X = torch.tensor(np.column_stack([power[initial_idx], speed[initial_idx]]), dtype=dtype, device=device)
 
