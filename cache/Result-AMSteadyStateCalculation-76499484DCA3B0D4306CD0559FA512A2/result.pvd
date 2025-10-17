@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<VTKFile type="Collection" version="1.0" byte_order="LittleEndian">
+	<Collection>
+		<DataSet timestep="3" group="" part="0" file="result_000.pvtu" name="Thermo-Calc" />
+	</Collection>
+</VTKFile>
