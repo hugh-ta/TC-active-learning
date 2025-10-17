@@ -68,9 +68,9 @@ n_total = len(depth)
 
 #inital defect classification function
 def classify_defect(width, depth, e, length=None, ed_low=edensity_low, ed_high=edensity_high):
-    keyholing = 1.9
-    lof = 1.5
-    balling = 4.35
+    keyholing = 1.5
+    lof = 1.9
+    balling = 0.23
     thickness = POWDER_THICKNESS
     jitter = 1e-9
 
@@ -193,88 +193,95 @@ evaluate_gp_classifiers(
 )
 
 # def acquisition function
-def entropy_sigma(X_grid, gp_models,X_train,top_k=5, alphadist = 0.1):
-    print("calculating acq func")
+def entropy_sigma(X_grid, gp_models, X_train, top_k=5, alpha_dist=0.1):
+    print("Calculating acquisition function...")
 
     for model in gp_models.values():
         model.eval()
     
     predictions = {}
-    variances = {}
+    # variances = {} # << VARIANCE PART COMMENTED OUT
     with torch.no_grad():
         for name, model in gp_models.items():
             posterior = model.posterior(X_grid)
-            # Clamp predictions to avoid log(0) issues
             predictions[name] = posterior.mean.clamp(1e-6, 1 - 1e-6)
-            variances[name] = posterior.variance.clamp(min=1e-9)
-    #entropy calculation
+            # variances[name] = posterior.variance.clamp(min=1e-9) # << VARIANCE PART COMMENTED OUT
+
+    # --- Entropy Calculation (The Core of the Acquisition) ---
     class_names = ["Good", "Keyhole", "Balling", "Lack of Fusion"]
     prob_tensor = torch.cat([predictions[name] for name in class_names], dim=1)
-    # Normalize probabilities so they sum to 1 for a cleaner entropy calculation
+    
+    # Normalize probabilities to ensure they sum to 1 for a clean entropy calculation
     prob_tensor_normalized = prob_tensor / torch.sum(prob_tensor, dim=1, keepdim=True)
-
     entropy = -torch.sum(prob_tensor_normalized * torch.log2(prob_tensor_normalized), dim=1)
 
-    #variance term
-    total_variance = torch.sum(torch.cat([variances[name] for name in class_names], dim=1), dim=1)
+    # --- Variance Term (Deactivated) ---
+    # total_variance = torch.sum(torch.cat([variances[name] for name in class_names], dim=1), dim=1) # << VARIANCE PART COMMENTED OUT
 
-    #J value
-    J_tensor = entropy * total_variance
+    # --- J value (Now driven by Entropy) ---
+    # J_tensor = entropy * total_variance # << OLD CALCULATION COMMENTED OUT
+    J_tensor = entropy # << NEW CALCULATION
     J = J_tensor.cpu().numpy()
 
-    #distance penalty
-    X_grid_np = X_grid.cpu().numpy()
-    X_train_np = X_train.cpu().numpy()
-    dists = np.min(np.linalg.norm(X_grid_np[:, None, :] - X_train_np[None, :, :], axis=-1), axis=1)
-    J *= (1 + alphadist * dists)
+    # --- Distance Penalty (Still useful for diversification) ---
+    if X_train is not None and X_train.shape[0] > 0:
+        dists = np.min(np.linalg.norm(X_grid.cpu().numpy()[:, None, :] - X_train.cpu().numpy()[None, :, :], axis=-1), axis=1)
+        J *= (1 + alpha_dist * dists)
 
-    #top indicies to avoid TC failed points
+    # --- Find top candidates ---
     top_indices = np.argsort(-J)[:top_k]
 
-    print("acq func done")
+    print("Acquisition function calculation complete.")
     return J, top_indices
 
 def plot_printability_map(gp_models, X_grid, power_grid, velo_grid, J=None, X_train=None, iteration=None):
+    """
+    Generates a printability map by predicting the most likely class from the GP
+    classifiers and plots the acquisition function alongside it.
+    """
+    print(f"Generating plot for iteration {iteration}...")
+    
     # --- 1. Predict the most likely class for each grid point ---
     with torch.no_grad():
-        # Get probabilities from each model
         predictions = {name: model.posterior(X_grid).mean for name, model in gp_models.items()}
     
     class_names = ["Good", "Keyhole", "Balling", "Lack of Fusion"]
-    # Stack predictions and find the argmax (the most likely class)
     prob_tensor = torch.cat([predictions[name] for name in class_names], dim=1)
-    # The argmax gives us an index (0, 1, 2, or 3) for each grid point
     pred_indices = torch.argmax(prob_tensor, dim=1).cpu().numpy()
     
-    # Map the numeric indices back to string labels
     index_to_label = {0: "Good", 1: "Keyhole", 2: "Balling", 3: "Lack of Fusion"}
-    labels_grid = np.array([index_to_label[i] for i in pred_indices])
-    labels_grid = labels_grid.reshape(len(power_grid), len(velo_grid))
+    labels_grid = np.array([index_to_label[i] for i in pred_indices]).reshape(len(power_grid), len(velo_grid))
 
-    # --- 2. Plotting (Adapted directly from your 'plot_mc_defect_map') ---
-    if J is not None:
-        fig, (ax_defect, ax_acq) = plt.subplots(1, 2, figsize=(15, 6))
-    else:
-        fig, ax_defect = plt.subplots(figsize=(8, 6))
-        ax_acq = None
+    # --- 2. Plotting ---
+    fig, (ax_defect, ax_acq) = plt.subplots(1, 2, figsize=(15, 6))
 
-    # Define colors and numeric mapping
     label_to_num = {"Good": 0, "Keyhole": 1, "Balling": 2, "Lack of Fusion": 3}
     defect_numeric_grid = np.vectorize(label_to_num.get)(labels_grid)
 
+    # --- THE FIX IS HERE ---
+    # We explicitly define white as the color for the "Good" class.
     colors = {
+        "Good": np.array([255, 255, 255]) / 255, # Explicitly define white
         "Keyhole": np.array([224, 123, 123]) / 255,
         "Lack of Fusion": np.array([123, 191, 200]) / 255,
         "Balling": np.array([40, 156, 142]) / 255,
     }
     
     # Create an RGB image for the plot background
-    rgb_grid = np.ones((*labels_grid.shape, 3))
-    alpha = 0.7
+    # It starts as black, and we will color EVERY region.
+    rgb_grid = np.zeros((*labels_grid.shape, 3))
+    alpha = 0.7 # Using a fixed alpha for consistency
+
+    # Now this loop will color all four regions, including "Good"
     for label, num in label_to_num.items():
         if label in colors:
             mask = (defect_numeric_grid == num)
-            rgb_grid[mask] = alpha * colors[label] + (1 - alpha) * 1.0
+            # For the "Good" region, we don't apply alpha blending
+            if label == "Good":
+                rgb_grid[mask] = colors[label]
+            else:
+                # For defects, blend with white for a lighter look
+                rgb_grid[mask] = alpha * colors[label] + (1 - alpha) * 1.0
 
     # Plot the defect map
     ax_defect.imshow(
@@ -282,19 +289,16 @@ def plot_printability_map(gp_models, X_grid, power_grid, velo_grid, J=None, X_tr
         extent=[velo_grid.min(), velo_grid.max(), power_grid.min(), power_grid.max()],
         origin="lower", aspect="auto", zorder=1
     )
+    # ... (rest of the plotting function is unchanged) ...
     ax_defect.set_xlabel("Scan Velocity (mm/s)")
     ax_defect.set_ylabel("Laser Power (W)")
     ax_defect.set_title(f"Predicted Printability Map (Iter {iteration})" if iteration is not None else "Predicted Printability Map")
 
-    # Plot training points if provided
     if X_train is not None:
         X_train_np = X_train.cpu().numpy()
-        # Plot previous points (all but the last)
         ax_defect.scatter(X_train_np[:-1, 1], X_train_np[:-1, 0], c='black', marker='o', s=30, label='Previous Points', zorder=5)
-        # Plot the newest point as a star
         ax_defect.scatter(X_train_np[-1, 1], X_train_np[-1, 0], c='red', marker='*', s=150, edgecolor='black', label='Newest Point', zorder=6)
 
-    # Create the legend
     legend_elements = [
         Patch(facecolor=colors["Keyhole"], label="Keyhole"),
         Patch(facecolor=colors["Lack of Fusion"], label="Lack of Fusion"),
@@ -303,23 +307,16 @@ def plot_printability_map(gp_models, X_grid, power_grid, velo_grid, J=None, X_tr
     ]
     ax_defect.legend(handles=legend_elements, loc="best")
 
-    # Plot the acquisition function if provided
-    if J is not None and ax_acq is not None:
+    if J is not None:
         grid_J = J.reshape(len(power_grid), len(velo_grid))
-        im = ax_acq.imshow(
-            grid_J, origin="lower",
-            extent=[velo_grid.min(), velo_grid.max(), power_grid.min(), power_grid.max()],
-            cmap='viridis', aspect='auto'
-        )
-        ax_acq.set_title(f"Acquisition Function (Iter {iteration})" if iteration is not None else "Acquisition Function")
+        im = ax_acq.imshow(grid_J, origin="lower", extent=[velo_grid.min(), velo_grid.max(), power_grid.min(), power_grid.max()], cmap='viridis', aspect='auto')
+        ax_acq.set_title(f"Acquisition Function (Iter {iteration})")
         ax_acq.set_xlabel("Scan Velocity (mm/s)")
-        fig.colorbar(im, ax=ax_acq, label="Acquisition Score (Entropy * Variance)")
-        
-        # Highlight the best candidate on the acquisition plot
+        fig.colorbar(im, ax=ax_acq, label="Acquisition Score")
         max_idx = np.unravel_index(np.argmax(J), grid_J.shape)
         ax_acq.scatter(velo_grid[max_idx[1]], power_grid[max_idx[0]], c='red', marker='*', s=150, edgecolor='white', label='Next Candidate')
         ax_acq.legend()
-
+    
     plt.tight_layout()
     plt.show()
 
