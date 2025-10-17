@@ -194,33 +194,36 @@ evaluate_gp_classifiers(
 
 # def acquisition function
 def entropy_sigma(X_grid, gp_models, X_train, top_k=5, alpha_dist=0.1):
-    print("Calculating acquisition function...")
+    """
+    Calculates acquisition score based on the probability of misclassification,
+    which is maximized on the decision boundaries between the top two classes.
+    """
+    print("Calculating acquisition function (using Probability of Misclassification method)...")
 
+    # Ensure models are in evaluation mode
     for model in gp_models.values():
         model.eval()
     
     predictions = {}
-    # variances = {} # << VARIANCE PART COMMENTED OUT
     with torch.no_grad():
         for name, model in gp_models.items():
             posterior = model.posterior(X_grid)
-            predictions[name] = posterior.mean.clamp(1e-6, 1 - 1e-6)
-            # variances[name] = posterior.variance.clamp(min=1e-9) # << VARIANCE PART COMMENTED OUT
+            # Clamp predictions to be safe
+            predictions[name] = posterior.mean.clamp(1e-6, 1.0)
 
-    # --- Entropy Calculation (The Core of the Acquisition) ---
+    # --- Boundary-Finding Method (Probability of Misclassification) ---
     class_names = ["Good", "Keyhole", "Balling", "Lack of Fusion"]
     prob_tensor = torch.cat([predictions[name] for name in class_names], dim=1)
     
-    # Normalize probabilities to ensure they sum to 1 for a clean entropy calculation
-    prob_tensor_normalized = prob_tensor / torch.sum(prob_tensor, dim=1, keepdim=True)
-    entropy = -torch.sum(prob_tensor_normalized * torch.log2(prob_tensor_normalized), dim=1)
-
-    # --- Variance Term (Deactivated) ---
-    # total_variance = torch.sum(torch.cat([variances[name] for name in class_names], dim=1), dim=1) # << VARIANCE PART COMMENTED OUT
-
-    # --- J value (Now driven by Entropy) ---
-    # J_tensor = entropy * total_variance # << OLD CALCULATION COMMENTED OUT
-    J_tensor = entropy # << NEW CALCULATION
+    # 1. For each point, find the top two probabilities
+    top_two_probs, _ = torch.topk(prob_tensor, 2, dim=1)
+    
+    p1 = top_two_probs[:, 0]  # The highest probability
+    p2 = top_two_probs[:, 1]  # The second-highest probability
+    
+    # 2. Calculate the acquisition score: 1 - (p1 - p2)
+    # This value is highest (close to 1) when p1 and p2 are nearly equal.
+    J_tensor = 1.0 - (p1 - p2)
     J = J_tensor.cpu().numpy()
 
     # --- Distance Penalty (Still useful for diversification) ---
