@@ -16,5 +16,5 @@ def create_gif(image_files, output_path, duration=500, loop=0):
 # Example usage
 if __name__ == "__main__":
     # Make sure all files exist and have correct extensions
-    imgs = ["Figure_1gif.png", "Figure_2gif.png", "Figure_3gif.png", "Figure_4gif.png", "Figure_5gif.png"]
-    create_gif(imgs, "output.gif", duration=300, loop=0)
+    imgs = ["1.png", "2.png", "3.png", "4.png", "5.png"]
+    create_gif(imgs, "output69.gif", duration=300, loop=0)
