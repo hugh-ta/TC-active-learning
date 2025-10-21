@@ -123,9 +123,9 @@ for target_output in TARGET_VARIABLES:
     dkl_gp.train()
     dkl_likelihood.train()
     optimizer_dkl = torch.optim.Adam([
-        {'params': dkl_gp.parameters()},
-        {'params': dkl_likelihood.parameters()}
-    ], lr=0.01)
+            {'params': dkl_gp.parameters()},
+            {'params': dkl_likelihood.parameters()}
+        ], lr=0.01)
     mll_dkl = gpytorch.mlls.VariationalELBO(dkl_likelihood, dkl_gp, num_data=TRAIN_X.size(0))
 
     for epoch in tqdm(range(TRAIN_EPOCHS), desc=f"DKL ({target_output}) Epoch"):
@@ -146,9 +146,9 @@ for target_output in TARGET_VARIABLES:
     base_gp.train()
     base_likelihood.train()
     optimizer_base = torch.optim.Adam([
-        {'params': base_gp.parameters()},
-        {'params': base_likelihood.parameters()}
-    ], lr=0.01)
+            {'params': base_gp.parameters()},
+            {'params': base_likelihood.parameters()}
+        ], lr=0.01)
     mll_base = gpytorch.mlls.VariationalELBO(base_likelihood, base_gp, num_data=TRAIN_X.size(0))
 
     for epoch in tqdm(range(TRAIN_EPOCHS), desc=f"Matern ({target_output}) Epoch"):
@@ -220,8 +220,33 @@ for target_output in TARGET_VARIABLES:
     plt.show()
 
     # Save models
-    torch.save(dkl_gp.state_dict(), f"dkl_gp_for_{target_output}.pth")
-    torch.save(base_gp.state_dict(), f"base_gp_for_{target_output}.pth")
+    # Instead of saving the full GP state dict, save just the kernel components:
+    # - For DKL: feature extractor weights + covar_module (Scale(Matern)) hyperparameters
+    # - For Base GP: covar_module (Scale(Matern)) hyperparameters
+    dkl_kernel_bundle = {
+        "feature_extractor_state": feature_extractor.state_dict(),
+        "covar_module_state": dkl_gp.covar_module.state_dict(),
+        "meta": {
+            "type": "DKL",
+            "kernel": "Scale(Matern nu=2.5)",
+            "input_dim": 2
+        }
+    }
+    torch.save(dkl_kernel_bundle, f"dkl_kernel_for_{target_output}.pth")
+
+    base_kernel_bundle = {
+        "covar_module_state": base_gp.covar_module.state_dict(),
+        "meta": {
+            "type": "Base",
+            "kernel": "Scale(Matern nu=2.5)",
+            "input_dim": 2
+        }
+    }
+    torch.save(base_kernel_bundle, f"matern_kernel_for_{target_output}.pth")
+
+    print("\n" + "=" * 60)
+    print(f"Kernels saved for target '{target_output}': dkl_kernel_for_{target_output}.pth and matern_kernel_for_{target_output}.pth")
+    print("=" * 60)
 
 print("\n" + "=" * 60)
 print("All targets processed and plotted.")

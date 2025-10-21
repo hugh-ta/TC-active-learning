@@ -1,0 +1,26 @@
+{
+  "ssType": "Single",
+  "amType": "STEADY",
+  "hsType": "DOUBLE_ELLIPSOIDAL",
+  "separateMaterial": false,
+  "percentagePowderDensity": 0.8,
+  "beamRadius": [
+    8.967E-5,
+    3.2749999999999996E-5,
+    1.0512999999999999E-4,
+    1.7149999999999997E-5
+  ],
+  "effectiveBeamRadius": 6.120999999999999E-5,
+  "power": 46.96969696969697,
+  "ringPowerPercent": 0.0,
+  "speed": 1054.5454545454545,
+  "absorptivity": 0.4569,
+  "layerThickness": 40.0,
+  "liquidusTemperature": 1726.778,
+  "solidusTemperature": 1664.645,
+  "evaporateTemperature": 2988.258980305507,
+  "mainFileName": "result.pvd",
+  "number": -1,
+  "expWidth": NaN,
+  "expDepth": NaN
+}

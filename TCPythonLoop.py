@@ -17,7 +17,6 @@ from gpytorch.mlls import ExactMarginalLogLikelihood
 
 # BoTorch
 from botorch.models import SingleTaskGP
-from botorch.models.transforms import Normalize, Standardize
 from botorch.fit import fit_gpytorch_mll
 from botorch.utils.sampling import draw_sobol_samples
 
